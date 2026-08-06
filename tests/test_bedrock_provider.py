@@ -575,8 +575,10 @@ class TestUsage:
         await provider.complete([{"role": "user", "content": "a"}], json_mode=False)
         await provider.complete([{"role": "user", "content": "b"}], json_mode=False)
 
-        assert provider.usage == {
-            "prompt_tokens": 300,
-            "completion_tokens": 130,
-            "total_tokens": 430,
-        }
+        usage = provider.usage
+        assert usage["prompt_tokens"] == 300
+        assert usage["completion_tokens"] == 130
+        assert usage["total_tokens"] == 430
+        assert usage["cached_tokens"] == 0
+        assert "cost_usd" in usage
+        assert "model" in usage

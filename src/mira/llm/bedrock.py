@@ -130,6 +130,10 @@ class BedrockProvider:
         self._client = session.client("bedrock-runtime")
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        self.total_cached_tokens = 0
+        self.total_cache_write_tokens = 0
+        self.total_reasoning_tokens = 0
+        self.total_cost_usd = 0.0
         logger.info(
             "Bedrock provider initialized: region=%s, model=%s",
             config.region,
@@ -197,17 +201,34 @@ class BedrockProvider:
             self._handle_api_error(e, model)
             raise  # unreachable, but satisfies type checkers
 
-        # Track usage
-        usage = response.get("usage", {})
-        input_tokens = usage.get("inputTokens", 0)
-        output_tokens = usage.get("outputTokens", 0)
-        self.total_prompt_tokens += input_tokens
-        self.total_completion_tokens += output_tokens
+        # Track usage (including prompt-cache counters when present)
+        from mira.llm.usage import estimate_cost_usd, parse_bedrock_usage
+
+        parsed = parse_bedrock_usage(response.get("usage"))
+        prompt = int(parsed["prompt_tokens"])
+        completion = int(parsed["completion_tokens"])
+        cached = int(parsed["cached_tokens"])
+        cache_write = int(parsed["cache_write_tokens"])
+        self.total_prompt_tokens += prompt
+        self.total_completion_tokens += completion
+        self.total_cached_tokens += cached
+        self.total_cache_write_tokens += cache_write
+        if prompt or completion:
+            self.total_cost_usd += estimate_cost_usd(
+                model or self.config.model,
+                prompt,
+                completion,
+                cached_tokens=cached,
+                cache_write_tokens=cache_write,
+            )
         logger.info(
-            "Bedrock response: model=%s, input_tokens=%d, output_tokens=%d, stop=%s",
+            "Bedrock response: model=%s, input_tokens=%d, output_tokens=%d, "
+            "cached=%d, cache_write=%d, stop=%s",
             model,
-            input_tokens,
-            output_tokens,
+            prompt,
+            completion,
+            cached,
+            cache_write,
             response.get("stopReason"),
         )
 
@@ -430,9 +451,14 @@ class BedrockProvider:
         return len(text) // 4
 
     @property
-    def usage(self) -> dict[str, int]:
+    def usage(self) -> dict[str, int | float | str]:
         return {
             "prompt_tokens": self.total_prompt_tokens,
             "completion_tokens": self.total_completion_tokens,
+            "cached_tokens": self.total_cached_tokens,
+            "cache_write_tokens": self.total_cache_write_tokens,
+            "reasoning_tokens": self.total_reasoning_tokens,
             "total_tokens": self.total_prompt_tokens + self.total_completion_tokens,
+            "cost_usd": round(self.total_cost_usd, 6),
+            "model": self.config.model,
         }

@@ -165,6 +165,12 @@ export interface ReviewEventModel {
   duration_ms: number
   categories: string
   created_at: number
+  prompt_tokens?: number
+  completion_tokens?: number
+  cached_tokens?: number
+  cache_write_tokens?: number
+  cost_usd?: number
+  model?: string
 }
 
 export interface ActivityEventModel extends ReviewEventModel {
@@ -232,6 +238,11 @@ export interface ReviewStatsModel {
   avg_duration_ms: number
   categories: Record<string, number>
   avg_comments_per_pr: number
+  total_prompt_tokens?: number
+  total_completion_tokens?: number
+  total_cached_tokens?: number
+  total_cache_write_tokens?: number
+  total_cost_usd?: number
 }
 
 export interface OrgStatsModel {

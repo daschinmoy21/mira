@@ -497,6 +497,37 @@ async def dispatch_github_event(
         background_tasks.add_task(handle_pr_merged, payload, app_auth, bot_name)
         return "processing"
 
+    # GitHub "Request review" button: when Mira is the requested reviewer,
+    # run the same full review as open/synchronize.
+    if event == "pull_request" and action == "review_requested":
+        requested = (payload.get("requested_reviewer") or {}).get("login", "")
+        if not requested:
+            # Team reviewer requests have no single login — analytics only.
+            return "ignored"
+        if not await _is_self_login(app_auth, bot_name, requested):
+            logger.debug("review_requested for %s — not Mira, skip review", requested)
+            return "ignored"
+        sender = payload.get("sender", {}).get("login", "")
+        if await _is_self_login(app_auth, bot_name, sender):
+            return "ignored"
+        pr_labels = payload.get("pull_request", {}).get("labels", [])
+        if any(lbl.get("name") == PAUSE_LABEL for lbl in pr_labels):
+            logger.info("PR paused via %s label — skip review_requested", PAUSE_LABEL)
+            return "paused"
+        names = mention_names(bot_name, await app_auth.get_bot_identity())
+        pr_body = payload.get("pull_request", {}).get("body", "") or ""
+        if any(re.search(rf"@{re.escape(n)}[ \t]+ignore\b", pr_body, re.IGNORECASE) for n in names):
+            logger.info("PR ignored via @%s ignore in description", bot_name)
+            return "ignored"
+        logger.info(
+            "Review requested for Mira (%s) on %s#%s — starting review",
+            requested,
+            payload.get("repository", {}).get("full_name", "?"),
+            payload.get("pull_request", {}).get("number", 0),
+        )
+        background_tasks.add_task(handle_pull_request, payload, app_auth, bot_name)
+        return "processing"
+
     if event == "pull_request" and action in _PR_ACTIONS:
         sender = payload.get("sender", {}).get("login", "")
         if await _is_self_login(app_auth, bot_name, sender):

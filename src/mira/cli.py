@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from datetime import UTC
 
@@ -59,7 +60,18 @@ def _format_text(result: ReviewResult) -> str:
 
     lines.append(f"Reviewed {result.reviewed_files} files, {len(result.comments)} comments.")
     if result.token_usage:
-        lines.append(f"Tokens used: {result.token_usage.get('total_tokens', 0)}")
+        total = result.token_usage.get("total_tokens", 0)
+        prompt = result.token_usage.get("prompt_tokens", 0)
+        completion = result.token_usage.get("completion_tokens", 0)
+        cached = result.token_usage.get("cached_tokens", 0)
+        cost = result.token_usage.get("cost_usd", 0)
+        parts = [f"Tokens used: {total} (in={prompt}, out={completion}"]
+        if cached:
+            parts[0] += f", cache_read={cached}"
+        parts[0] += ")"
+        lines.append(parts[0])
+        if cost:
+            lines.append(f"Cost: ${float(cost):.4f}")
 
     return "\n".join(lines)
 
@@ -145,6 +157,12 @@ def main() -> None:
     help="Skip walkthrough generation. Useful in dry-run loops where only the "
     "inline review is needed and the extra LLM call should be saved.",
 )
+@click.option(
+    "--bot-name",
+    envvar="MIRA_BOT_NAME",
+    default=None,
+    help="Bot @mention in walkthrough/help footers. Auto-detected from the token user when unset.",
+)
 def review(
     pr_url: str | None,
     use_stdin: bool,
@@ -158,6 +176,7 @@ def review(
     verbose: bool,
     config_path: str | None,
     no_walkthrough: bool,
+    bot_name: str | None,
 ) -> None:
     """Review a pull request or diff."""
     logging.basicConfig(
@@ -189,8 +208,9 @@ def review(
     llm = create_llm(llm_config_for("review", config.llm))
     indexing_llm = create_llm(llm_config_for("indexing", config.llm))
 
-    git_token = token or github_token
+    git_token = token or github_token or os.environ.get("MIRA_GITHUB_TOKEN")
     github_provider = None
+    provider_type = "github"
     if pr_url:
         if not git_token:
             raise click.UsageError(
@@ -215,8 +235,31 @@ def review(
                 f"Unknown provider type {provider_type!r}. Available providers: {available}"
             ) from err
 
+    # Resolve @mention for footers (walkthrough help, reject hints). Prefer
+    # explicit --bot-name / MIRA_BOT_NAME, else platform identity from the token.
+    if not bot_name and git_token and provider_type == "github":
+        try:
+            from mira.platforms.github.auth import GitHubTokenAuth
+
+            bot_name = asyncio.run(GitHubTokenAuth(git_token).get_bot_identity())
+        except Exception:
+            bot_name = None
+    if not bot_name:
+        try:
+            from mira.dashboard.api import _app_db
+
+            bot_name = _app_db.get_setting("bot_name") or None
+        except Exception:
+            bot_name = None
+    bot_name = bot_name or "miracodeai"
+
     engine = ReviewEngine(
-        config=config, llm=llm, provider=github_provider, dry_run=dry_run, indexing_llm=indexing_llm
+        config=config,
+        llm=llm,
+        provider=github_provider,
+        dry_run=dry_run,
+        indexing_llm=indexing_llm,
+        bot_name=bot_name,
     )
 
     try:

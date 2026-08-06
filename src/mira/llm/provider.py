@@ -19,6 +19,7 @@ from mira.config import LLMConfig
 from mira.exceptions import LLMError, NonRetriableLLMError
 from mira.llm import provider_profiles as profiles
 from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL, SUBMIT_WALKTHROUGH_TOOL
+from mira.llm.usage import estimate_cost_usd, parse_openai_usage
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,10 @@ class LLMProvider:
         self.profile = profiles.resolve(config.base_url)
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        self.total_cached_tokens = 0
+        self.total_cache_write_tokens = 0
+        self.total_reasoning_tokens = 0
+        self.total_cost_usd = 0.0
         # Models that 400 on a forced tool_choice (deepseek thinking mode);
         # remembered so we send tool_choice="auto" instead.
         self._no_forced_tool_choice: set[str] = set()
@@ -178,12 +183,7 @@ class LLMProvider:
             data = resp.json()
 
         content = data["choices"][0]["message"].get("content") or ""
-
-        usage = data.get("usage")
-        if usage:
-            self.total_prompt_tokens += usage.get("prompt_tokens", 0)
-            self.total_completion_tokens += usage.get("completion_tokens", 0)
-
+        self._record_usage(data.get("usage"), model=model)
         return content
 
     async def _call_llm_with_tools(
@@ -247,11 +247,7 @@ class LLMProvider:
                 raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
             data = resp.json()
 
-        usage = data.get("usage")
-        if usage:
-            self.total_prompt_tokens += usage.get("prompt_tokens", 0)
-            self.total_completion_tokens += usage.get("completion_tokens", 0)
-
+        self._record_usage(data.get("usage"), model=model)
         message = data["choices"][0]["message"]
         tool_calls = message.get("tool_calls")
 
@@ -354,11 +350,7 @@ class LLMProvider:
                 raise LLMError(f"LLM API error {resp.status_code}: {resp.text}")
             data = resp.json()
 
-        usage = data.get("usage")
-        if usage:
-            self.total_prompt_tokens += usage.get("prompt_tokens", 0)
-            self.total_completion_tokens += usage.get("completion_tokens", 0)
-
+        self._record_usage(data.get("usage"), model=model)
         return data["choices"][0]["message"]
 
     async def complete_agentic(
@@ -466,10 +458,43 @@ class LLMProvider:
         """Estimate token count. Uses ~4 chars per token heuristic."""
         return len(text) // 4
 
+    def _record_usage(self, usage: dict | None, *, model: str) -> None:
+        """Accumulate token + cost stats from one API response."""
+        parsed = parse_openai_usage(usage)
+        prompt = int(parsed["prompt_tokens"])
+        completion = int(parsed["completion_tokens"])
+        cached = int(parsed["cached_tokens"])
+        cache_write = int(parsed["cache_write_tokens"])
+        reasoning = int(parsed["reasoning_tokens"])
+
+        self.total_prompt_tokens += prompt
+        self.total_completion_tokens += completion
+        self.total_cached_tokens += cached
+        self.total_cache_write_tokens += cache_write
+        self.total_reasoning_tokens += reasoning
+
+        if "cost_usd" in parsed:
+            self.total_cost_usd += float(parsed["cost_usd"])
+        elif prompt or completion:
+            # Provider omitted cost (non-OpenRouter endpoint) — estimate from
+            # registry pricing so the dashboard still has a $ figure.
+            self.total_cost_usd += estimate_cost_usd(
+                model or self.config.model,
+                prompt,
+                completion,
+                cached_tokens=cached,
+                cache_write_tokens=cache_write,
+            )
+
     @property
-    def usage(self) -> dict[str, int]:
+    def usage(self) -> dict[str, int | float | str]:
         return {
             "prompt_tokens": self.total_prompt_tokens,
             "completion_tokens": self.total_completion_tokens,
+            "cached_tokens": self.total_cached_tokens,
+            "cache_write_tokens": self.total_cache_write_tokens,
+            "reasoning_tokens": self.total_reasoning_tokens,
             "total_tokens": self.total_prompt_tokens + self.total_completion_tokens,
+            "cost_usd": round(self.total_cost_usd, 6),
+            "model": self.config.model,
         }

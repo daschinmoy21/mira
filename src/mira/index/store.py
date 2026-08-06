@@ -16,6 +16,35 @@ logger = logging.getLogger(__name__)
 
 _INDEX_DIR = os.environ.get("MIRA_INDEX_DIR", "/data/indexes")
 
+
+def _review_event_from_row(r: tuple) -> ReviewEvent:
+    """Map a SELECT row (list_review_events column order) to ReviewEvent."""
+    return ReviewEvent(
+        id=r[0],
+        pr_number=r[1],
+        pr_title=r[2],
+        pr_url=r[3],
+        author=r[4],
+        comments_posted=r[5],
+        blockers=r[6],
+        warnings=r[7],
+        suggestions=r[8],
+        files_reviewed=r[9],
+        lines_changed=r[10],
+        tokens_used=r[11],
+        duration_ms=r[12],
+        categories=r[13],
+        created_at=r[14],
+        author_avatar_url=r[15],
+        reviewed_paths=r[16],
+        prompt_tokens=int(r[17] or 0),
+        completion_tokens=int(r[18] or 0),
+        cached_tokens=int(r[19] or 0),
+        cache_write_tokens=int(r[20] or 0),
+        cost_usd=float(r[21] or 0),
+        model=r[22] or "",
+    )
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
     path TEXT PRIMARY KEY,
@@ -83,6 +112,12 @@ CREATE TABLE IF NOT EXISTS review_events (
     files_reviewed INTEGER NOT NULL DEFAULT 0,
     lines_changed INTEGER NOT NULL DEFAULT 0,
     tokens_used INTEGER NOT NULL DEFAULT 0,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    model TEXT NOT NULL DEFAULT '',
     duration_ms INTEGER NOT NULL DEFAULT 0,
     categories TEXT NOT NULL DEFAULT '',
     author_avatar_url TEXT NOT NULL DEFAULT '',
@@ -265,6 +300,12 @@ class ReviewEvent:
     created_at: float = 0.0
     author_avatar_url: str = ""
     reviewed_paths: str = ""  # JSON array of filenames reviewed this pass
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+    cache_write_tokens: int = 0
+    cost_usd: float = 0.0
+    model: str = ""
 
 
 @dataclass
@@ -385,13 +426,28 @@ class IndexStore(_StoreSharedMixin):
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(files)").fetchall()}
         if "loc" not in cols:
             self._conn.execute("ALTER TABLE files ADD COLUMN loc INTEGER NOT NULL DEFAULT 0")
-        # Columns added to review_events post-schema (PR author + reviewed files).
+        # Columns added to review_events post-schema (PR author, reviewed files,
+        # token/cost breakdown for dashboard spend tracking).
         re_cols = {r[1] for r in self._conn.execute("PRAGMA table_info(review_events)").fetchall()}
-        for col in ("author", "author_avatar_url", "reviewed_paths"):
+        for col in ("author", "author_avatar_url", "reviewed_paths", "model"):
             if col not in re_cols:
                 self._conn.execute(
                     f"ALTER TABLE review_events ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"
                 )
+        for col in (
+            "prompt_tokens",
+            "completion_tokens",
+            "cached_tokens",
+            "cache_write_tokens",
+        ):
+            if col not in re_cols:
+                self._conn.execute(
+                    f"ALTER TABLE review_events ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
+                )
+        if "cost_usd" not in re_cols:
+            self._conn.execute(
+                "ALTER TABLE review_events ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0"
+            )
         feedback_cols = {
             r[1] for r in self._conn.execute("PRAGMA table_info(feedback_events)").fetchall()
         }
@@ -678,14 +734,22 @@ class IndexStore(_StoreSharedMixin):
         author: str = "",
         author_avatar_url: str = "",
         reviewed_paths: str = "",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        cached_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        cost_usd: float = 0.0,
+        model: str = "",
     ) -> ReviewEvent:
         now = created_at if created_at is not None else time.time()
         self._conn.execute(
             "INSERT INTO review_events "
             "(pr_number, pr_title, pr_url, author, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, author_avatar_url, reviewed_paths, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "categories, author_avatar_url, reviewed_paths, created_at, "
+            "prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, "
+            "cost_usd, model) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 pr_number,
                 pr_title,
@@ -703,6 +767,12 @@ class IndexStore(_StoreSharedMixin):
                 author_avatar_url,
                 reviewed_paths,
                 now,
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                cache_write_tokens,
+                cost_usd,
+                model,
             ),
         )
         self._conn.commit()
@@ -725,69 +795,37 @@ class IndexStore(_StoreSharedMixin):
             created_at=now,
             author_avatar_url=author_avatar_url,
             reviewed_paths=reviewed_paths,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
+            cost_usd=cost_usd,
+            model=model,
         )
 
     def list_review_events(self, limit: int = 100) -> list[ReviewEvent]:
         rows = self._conn.execute(
             "SELECT id, pr_number, pr_title, pr_url, author, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, created_at, author_avatar_url, reviewed_paths "
+            "categories, created_at, author_avatar_url, reviewed_paths, "
+            "prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, "
+            "cost_usd, model "
             "FROM review_events ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
-        return [
-            ReviewEvent(
-                id=r[0],
-                pr_number=r[1],
-                pr_title=r[2],
-                pr_url=r[3],
-                author=r[4],
-                comments_posted=r[5],
-                blockers=r[6],
-                warnings=r[7],
-                suggestions=r[8],
-                files_reviewed=r[9],
-                lines_changed=r[10],
-                tokens_used=r[11],
-                duration_ms=r[12],
-                categories=r[13],
-                created_at=r[14],
-                author_avatar_url=r[15],
-                reviewed_paths=r[16],
-            )
-            for r in rows
-        ]
+        return [_review_event_from_row(r) for r in rows]
 
     def list_review_events_for_pr(self, pr_number: int) -> list[ReviewEvent]:
         rows = self._conn.execute(
             "SELECT id, pr_number, pr_title, pr_url, author, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, created_at, author_avatar_url, reviewed_paths "
+            "categories, created_at, author_avatar_url, reviewed_paths, "
+            "prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, "
+            "cost_usd, model "
             "FROM review_events WHERE pr_number = ? ORDER BY created_at DESC",
             (pr_number,),
         ).fetchall()
-        return [
-            ReviewEvent(
-                id=r[0],
-                pr_number=r[1],
-                pr_title=r[2],
-                pr_url=r[3],
-                author=r[4],
-                comments_posted=r[5],
-                blockers=r[6],
-                warnings=r[7],
-                suggestions=r[8],
-                files_reviewed=r[9],
-                lines_changed=r[10],
-                tokens_used=r[11],
-                duration_ms=r[12],
-                categories=r[13],
-                created_at=r[14],
-                author_avatar_url=r[15],
-                reviewed_paths=r[16],
-            )
-            for r in rows
-        ]
+        return [_review_event_from_row(r) for r in rows]
 
     def add_review_comments(
         self, review_id: int, pr_number: int, pr_url: str, comments: list[dict]
@@ -970,7 +1008,10 @@ class IndexStore(_StoreSharedMixin):
             "SELECT COUNT(*), COALESCE(SUM(comments_posted),0), COALESCE(SUM(blockers),0), "
             "COALESCE(SUM(warnings),0), COALESCE(SUM(suggestions),0), "
             "COALESCE(SUM(files_reviewed),0), COALESCE(SUM(lines_changed),0), "
-            "COALESCE(SUM(tokens_used),0), COALESCE(AVG(duration_ms),0) "
+            "COALESCE(SUM(tokens_used),0), COALESCE(AVG(duration_ms),0), "
+            "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), "
+            "COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cache_write_tokens),0), "
+            "COALESCE(SUM(cost_usd),0) "
             f"FROM review_events{where}",
             params,
         ).fetchone()
@@ -999,6 +1040,11 @@ class IndexStore(_StoreSharedMixin):
             "total_lines_changed": row[6],
             "total_tokens": row[7],
             "avg_duration_ms": int(row[8]),
+            "total_prompt_tokens": int(row[9]),
+            "total_completion_tokens": int(row[10]),
+            "total_cached_tokens": int(row[11]),
+            "total_cache_write_tokens": int(row[12]),
+            "total_cost_usd": float(row[13]),
             "categories": cat_counts,
         }
 

@@ -112,6 +112,10 @@ type PRGroup = {
   totalWarnings: number
   totalSuggestions: number
   totalTokens: number
+  totalCostUsd: number
+  totalPromptTokens: number
+  totalCompletionTokens: number
+  totalCachedTokens: number
   totalDurationMs: number
 }
 
@@ -136,6 +140,10 @@ function groupByPR(events: ActivityEventModel[]): PRGroup[] {
     let totalWarnings = 0
     let totalSuggestions = 0
     let totalTokens = 0
+    let totalCostUsd = 0
+    let totalPromptTokens = 0
+    let totalCompletionTokens = 0
+    let totalCachedTokens = 0
     let totalDurationMs = 0
     for (const r of reviews) {
       splitCategories(r.categories).forEach((c) => cats.add(c))
@@ -144,6 +152,10 @@ function groupByPR(events: ActivityEventModel[]): PRGroup[] {
       totalWarnings += r.warnings
       totalSuggestions += r.suggestions
       totalTokens += r.tokens_used
+      totalCostUsd += r.cost_usd ?? 0
+      totalPromptTokens += r.prompt_tokens ?? 0
+      totalCompletionTokens += r.completion_tokens ?? 0
+      totalCachedTokens += r.cached_tokens ?? 0
       totalDurationMs += r.duration_ms
     }
     groups.push({
@@ -166,6 +178,10 @@ function groupByPR(events: ActivityEventModel[]): PRGroup[] {
       totalWarnings,
       totalSuggestions,
       totalTokens,
+      totalCostUsd,
+      totalPromptTokens,
+      totalCompletionTokens,
+      totalCachedTokens,
       totalDurationMs,
     })
   }
@@ -839,6 +855,20 @@ export function ActivityPage() {
                 <Stat label="Files reviewed" value={selected.latest.files_reviewed} />
                 <Stat label="Lines changed" value={selected.latest.lines_changed.toLocaleString()} />
                 <Stat label="Tokens used" value={selected.totalTokens.toLocaleString()} />
+                <Stat
+                  label="LLM cost"
+                  value={
+                    selected.totalCostUsd > 0
+                      ? selected.totalCostUsd < 0.01
+                        ? "<$0.01"
+                        : `$${selected.totalCostUsd.toFixed(4)}`
+                      : "$0"
+                  }
+                />
+                <Stat
+                  label="In / out / cache"
+                  value={`${selected.totalPromptTokens.toLocaleString()} / ${selected.totalCompletionTokens.toLocaleString()} / ${selected.totalCachedTokens.toLocaleString()}`}
+                />
                 <Stat label="Total time" value={`${(selected.totalDurationMs / 1000).toFixed(1)}s`} />
               </dl>
 
@@ -1077,7 +1107,18 @@ function ReviewEntry({
 
       <div className="mt-2 text-xs text-muted-foreground">
         {plural(review.comments_posted, "comment")} · {review.lines_changed.toLocaleString()} lines ·{" "}
-        {review.tokens_used.toLocaleString()} tokens · {(review.duration_ms / 1000).toFixed(1)}s
+        {review.tokens_used.toLocaleString()} tokens
+        {(review.prompt_tokens || review.completion_tokens)
+          ? ` (${(review.prompt_tokens ?? 0).toLocaleString()} in / ${(review.completion_tokens ?? 0).toLocaleString()} out${
+              (review.cached_tokens ?? 0) > 0
+                ? ` / ${(review.cached_tokens ?? 0).toLocaleString()} cache`
+                : ""
+            })`
+          : ""}
+        {(review.cost_usd ?? 0) > 0
+          ? ` · $${review.cost_usd! < 0.01 ? "<0.01" : review.cost_usd!.toFixed(4)}`
+          : ""}
+        {review.model ? ` · ${review.model}` : ""} · {(review.duration_ms / 1000).toFixed(1)}s
       </div>
     </>
   )

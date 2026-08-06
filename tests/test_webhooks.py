@@ -507,6 +507,37 @@ async def test_pr_opened_still_reviewed_when_review_on_synchronize_off(
 
 @patch("mira.platforms.github.webhook.load_config")
 @patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
+async def test_review_requested_for_mira_triggers_review(
+    mock_handler: AsyncMock, mock_load_config, app_auth: GitHubAppAuth, client: AsyncClient
+) -> None:
+    """GitHub "Request review" for the bot account should start a full review."""
+    mock_load_config.return_value = MiraConfig()
+    app_auth.get_bot_identity = AsyncMock(return_value=BOT_NAME)  # type: ignore[method-assign]
+    payload = _make_pr_payload(action="review_requested")
+    payload["sender"] = {"login": "alice"}
+    payload["requested_reviewer"] = {"login": BOT_NAME}
+    result = await _post(client, "pull_request", payload)
+    assert result["status"] == "processing"
+    mock_handler.assert_awaited_once()
+
+
+@patch("mira.platforms.github.webhook.load_config")
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
+async def test_review_requested_for_other_user_skipped(
+    mock_handler: AsyncMock, mock_load_config, app_auth: GitHubAppAuth, client: AsyncClient
+) -> None:
+    mock_load_config.return_value = MiraConfig()
+    app_auth.get_bot_identity = AsyncMock(return_value=BOT_NAME)  # type: ignore[method-assign]
+    payload = _make_pr_payload(action="review_requested")
+    payload["sender"] = {"login": "alice"}
+    payload["requested_reviewer"] = {"login": "some-human"}
+    result = await _post(client, "pull_request", payload)
+    assert result["status"] == "ignored"
+    mock_handler.assert_not_awaited()
+
+
+@patch("mira.platforms.github.webhook.load_config")
+@patch("mira.platforms.github.webhook.handle_pull_request", new_callable=AsyncMock)
 async def test_pr_synchronize_reviewed_by_default(
     mock_handler: AsyncMock, mock_load_config, client: AsyncClient
 ) -> None:

@@ -127,7 +127,7 @@ export function DashboardPage() {
       )}
 
       {/* Stat cards */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>PRs Reviewed</CardDescription>
@@ -209,6 +209,40 @@ export function DashboardPage() {
                 </div>
                 <div className="text-muted-foreground">
                   {rs ? fmt(rs.total_tokens) : "0"} tokens used
+                </div>
+              </>
+            )}
+          </CardFooter>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardDescription>LLM Spend</CardDescription>
+            <CardTitle className="text-4xl tabular-nums">
+              {statsLoading ? (
+                <Skeleton className="h-9 w-24" />
+              ) : (
+                formatUsd(rs?.total_cost_usd ?? 0)
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardFooter className="flex-col items-start gap-1 text-sm">
+            {statsLoading ? (
+              <>
+                <Skeleton className="h-4 w-40" />
+                <Skeleton className="h-4 w-36" />
+              </>
+            ) : (
+              <>
+                <div className="font-medium">
+                  {fmt(rs?.total_prompt_tokens ?? 0)} in ·{" "}
+                  {fmt(rs?.total_completion_tokens ?? 0)} out
+                </div>
+                <div className="text-muted-foreground">
+                  {fmt(rs?.total_cached_tokens ?? 0)} cache read
+                  {(rs?.total_cache_write_tokens ?? 0) > 0
+                    ? ` · ${fmt(rs?.total_cache_write_tokens ?? 0)} cache write`
+                    : ""}
                 </div>
               </>
             )}
@@ -306,13 +340,33 @@ export function DashboardPage() {
         <Card>
           <CardHeader>
             <CardTitle>Token Usage</CardTitle>
-            <CardDescription>LLM tokens consumed over time</CardDescription>
+            <CardDescription>
+              Input / output / cache-read tokens over time
+            </CardDescription>
           </CardHeader>
           <CardContent>
             {timeseriesLoading ? (
               <ChartSkeleton />
             ) : timeseries && timeseries.length > 0 ? (
               <TokensChart key={period} data={timeseries} useBars={period !== "day"} />
+            ) : (
+              <Empty />
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>LLM Cost</CardTitle>
+            <CardDescription>
+              Spend over time (OpenRouter billed cost when available)
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {timeseriesLoading ? (
+              <ChartSkeleton />
+            ) : timeseries && timeseries.length > 0 ? (
+              <CostChart key={period} data={timeseries} useBars={period !== "day"} />
             ) : (
               <Empty />
             )}
@@ -409,7 +463,19 @@ type TSPoint = {
   suggestions: number
   lines_changed: number
   tokens_used: number
+  prompt_tokens?: number
+  completion_tokens?: number
+  cached_tokens?: number
+  cost_usd?: number
   categories: Record<string, number>
+}
+
+function formatUsd(n: number): string {
+  if (!n || n <= 0) return "$0"
+  if (n < 0.01) return "<$0.01"
+  if (n < 1) return `$${n.toFixed(3)}`
+  if (n < 100) return `$${n.toFixed(2)}`
+  return `$${n.toFixed(0)}`
 }
 
 function ReviewsChart({ data, useBars }: { data: TSPoint[]; useBars: boolean }) {
@@ -445,10 +511,20 @@ function ReviewsChart({ data, useBars }: { data: TSPoint[]; useBars: boolean }) 
 // ── Tokens chart ──
 
 const tokensConfig = {
-  tokens_used: { label: "Tokens", color: "var(--chart-3)" },
+  prompt_tokens: { label: "Input", color: "var(--chart-3)" },
+  completion_tokens: { label: "Output", color: "var(--chart-1)" },
+  cached_tokens: { label: "Cache read", color: "var(--chart-5)" },
+  tokens_used: { label: "Total", color: "var(--chart-3)" },
 } satisfies ChartConfig
 
 function TokensChart({ data, useBars }: { data: TSPoint[]; useBars: boolean }) {
+  // Prefer the breakdown when any period has prompt/completion data; fall back
+  // to total tokens for historical events recorded before the split existed.
+  // Note: OpenRouter's prompt_tokens already includes cached_tokens, so we
+  // chart them as separate series (not stacked) to avoid double-counting.
+  const hasBreakdown = data.some(
+    (d) => (d.prompt_tokens ?? 0) > 0 || (d.completion_tokens ?? 0) > 0,
+  )
   const xAxis = (
     <XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={8} tickFormatter={formatDate} />
   )
@@ -459,18 +535,77 @@ function TokensChart({ data, useBars }: { data: TSPoint[]; useBars: boolean }) {
           <CartesianGrid vertical={false} />
           {xAxis}
           <ChartTooltip content={<ChartTooltipContent />} />
-          <Bar dataKey="tokens_used" fill="var(--color-tokens_used)" radius={[4, 4, 0, 0]} />
+          {hasBreakdown ? (
+            <>
+              <Bar dataKey="prompt_tokens" fill="var(--color-prompt_tokens)" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="completion_tokens" fill="var(--color-completion_tokens)" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="cached_tokens" fill="var(--color-cached_tokens)" radius={[4, 4, 0, 0]} />
+            </>
+          ) : (
+            <Bar dataKey="tokens_used" fill="var(--color-tokens_used)" radius={[4, 4, 0, 0]} />
+          )}
         </BarChart>
       </ChartContainer>
     )
   }
   return (
     <ChartContainer config={tokensConfig} className="h-[250px] w-full">
-      <AreaChart data={data}>
+      <LineChart data={data}>
         <CartesianGrid vertical={false} />
         {xAxis}
         <ChartTooltip content={<ChartTooltipContent />} />
-        <Area type="monotone" dataKey="tokens_used" stroke="var(--color-tokens_used)" fill="var(--color-tokens_used)" fillOpacity={0.15} strokeWidth={2} />
+        {hasBreakdown ? (
+          <>
+            <Line type="monotone" dataKey="prompt_tokens" stroke="var(--color-prompt_tokens)" strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="completion_tokens" stroke="var(--color-completion_tokens)" strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="cached_tokens" stroke="var(--color-cached_tokens)" strokeWidth={2} dot={false} />
+          </>
+        ) : (
+          <Line type="monotone" dataKey="tokens_used" stroke="var(--color-tokens_used)" strokeWidth={2} dot={false} />
+        )}
+      </LineChart>
+    </ChartContainer>
+  )
+}
+
+// ── Cost chart ──
+
+const costConfig = {
+  cost_usd: { label: "USD", color: "var(--chart-2)" },
+} satisfies ChartConfig
+
+function CostChart({ data, useBars }: { data: TSPoint[]; useBars: boolean }) {
+  const xAxis = (
+    <XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={8} tickFormatter={formatDate} />
+  )
+  const tooltip = (
+    <ChartTooltip
+      content={
+        <ChartTooltipContent
+          formatter={(value) => formatUsd(typeof value === "number" ? value : Number(value) || 0)}
+        />
+      }
+    />
+  )
+  if (useBars) {
+    return (
+      <ChartContainer config={costConfig} className="h-[250px] w-full">
+        <BarChart data={data}>
+          <CartesianGrid vertical={false} />
+          {xAxis}
+          {tooltip}
+          <Bar dataKey="cost_usd" fill="var(--color-cost_usd)" radius={[4, 4, 0, 0]} />
+        </BarChart>
+      </ChartContainer>
+    )
+  }
+  return (
+    <ChartContainer config={costConfig} className="h-[250px] w-full">
+      <AreaChart data={data}>
+        <CartesianGrid vertical={false} />
+        {xAxis}
+        {tooltip}
+        <Area type="monotone" dataKey="cost_usd" stroke="var(--color-cost_usd)" fill="var(--color-cost_usd)" fillOpacity={0.15} strokeWidth={2} />
       </AreaChart>
     </ChartContainer>
   )

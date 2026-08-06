@@ -429,11 +429,20 @@ class TestUsageProperty:
         provider = LLMProvider(config)
         provider.total_prompt_tokens = 100
         provider.total_completion_tokens = 50
+        provider.total_cached_tokens = 20
+        provider.total_cache_write_tokens = 5
+        provider.total_reasoning_tokens = 10
+        provider.total_cost_usd = 0.0123
 
         usage = provider.usage
         assert usage["prompt_tokens"] == 100
         assert usage["completion_tokens"] == 50
         assert usage["total_tokens"] == 150
+        assert usage["cached_tokens"] == 20
+        assert usage["cache_write_tokens"] == 5
+        assert usage["reasoning_tokens"] == 10
+        assert usage["cost_usd"] == pytest.approx(0.0123)
+        assert usage["model"] == "test-model"
 
 
 class TestStripModelPrefix:

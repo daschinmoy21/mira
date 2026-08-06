@@ -32,6 +32,36 @@ from mira.models import PRFingerprint
 
 logger = logging.getLogger(__name__)
 
+
+def _pg_review_event_from_row(r: tuple) -> ReviewEvent:
+    """Map a Postgres SELECT row (list_review_events column order) to ReviewEvent."""
+    return ReviewEvent(
+        id=r[0],
+        pr_number=r[1],
+        pr_title=r[2],
+        pr_url=r[3],
+        comments_posted=r[4],
+        blockers=r[5],
+        warnings=r[6],
+        suggestions=r[7],
+        files_reviewed=r[8],
+        lines_changed=r[9],
+        tokens_used=r[10],
+        duration_ms=r[11],
+        categories=r[12],
+        created_at=r[13],
+        author=r[14],
+        author_avatar_url=r[15],
+        reviewed_paths=r[16],
+        prompt_tokens=int(r[17] or 0),
+        completion_tokens=int(r[18] or 0),
+        cached_tokens=int(r[19] or 0),
+        cache_write_tokens=int(r[20] or 0),
+        cost_usd=float(r[21] or 0),
+        model=r[22] or "",
+    )
+
+
 _PG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
     owner TEXT NOT NULL,
@@ -108,6 +138,12 @@ CREATE TABLE IF NOT EXISTS review_events (
     files_reviewed INTEGER NOT NULL DEFAULT 0,
     lines_changed INTEGER NOT NULL DEFAULT 0,
     tokens_used INTEGER NOT NULL DEFAULT 0,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+    model TEXT NOT NULL DEFAULT '',
     duration_ms INTEGER NOT NULL DEFAULT 0,
     categories TEXT NOT NULL DEFAULT '',
     author TEXT NOT NULL DEFAULT '',
@@ -274,11 +310,25 @@ def _get_conn(url: str) -> Any:
                 cur.execute(
                     "ALTER TABLE files ADD COLUMN IF NOT EXISTS loc INTEGER NOT NULL DEFAULT 0"
                 )
-                for col in ("author", "author_avatar_url", "reviewed_paths"):
+                for col in ("author", "author_avatar_url", "reviewed_paths", "model"):
                     cur.execute(
                         f"ALTER TABLE review_events ADD COLUMN IF NOT EXISTS {col} "
                         "TEXT NOT NULL DEFAULT ''"
                     )
+                for col in (
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "cached_tokens",
+                    "cache_write_tokens",
+                ):
+                    cur.execute(
+                        f"ALTER TABLE review_events ADD COLUMN IF NOT EXISTS {col} "
+                        "INTEGER NOT NULL DEFAULT 0"
+                    )
+                cur.execute(
+                    "ALTER TABLE review_events ADD COLUMN IF NOT EXISTS cost_usd "
+                    "DOUBLE PRECISION NOT NULL DEFAULT 0"
+                )
                 cur.execute(
                     "ALTER TABLE learned_rules ADD COLUMN IF NOT EXISTS status "
                     "TEXT NOT NULL DEFAULT 'approved'"
@@ -794,6 +844,12 @@ class PgIndexStore(_StoreSharedMixin):
         author: str = "",
         author_avatar_url: str = "",
         reviewed_paths: str = "",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        cached_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        cost_usd: float = 0.0,
+        model: str = "",
     ) -> ReviewEvent:
         now = created_at if created_at is not None else time.time()
         with self._cursor() as cur:
@@ -801,8 +857,11 @@ class PgIndexStore(_StoreSharedMixin):
                 "INSERT INTO review_events (owner, repo, pr_number, pr_title, pr_url, "
                 "comments_posted, blockers, warnings, suggestions, files_reviewed, "
                 "lines_changed, tokens_used, duration_ms, categories, author, "
-                "author_avatar_url, reviewed_paths, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "author_avatar_url, reviewed_paths, created_at, "
+                "prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, "
+                "cost_usd, model) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                "%s, %s, %s, %s, %s, %s) "
                 "RETURNING id",
                 (
                     self._owner,
@@ -823,6 +882,12 @@ class PgIndexStore(_StoreSharedMixin):
                     author_avatar_url,
                     reviewed_paths,
                     now,
+                    prompt_tokens,
+                    completion_tokens,
+                    cached_tokens,
+                    cache_write_tokens,
+                    cost_usd,
+                    model,
                 ),
             )
             row_id = cur.fetchone()[0]
@@ -844,6 +909,12 @@ class PgIndexStore(_StoreSharedMixin):
             author=author,
             author_avatar_url=author_avatar_url,
             reviewed_paths=reviewed_paths,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
+            cost_usd=cost_usd,
+            model=model,
         )
 
     def upsert_pr_fingerprint(self, fp: PRFingerprint) -> None:
@@ -896,65 +967,27 @@ class PgIndexStore(_StoreSharedMixin):
         rows = self._fetchall(
             "SELECT id, pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, created_at, author, author_avatar_url, reviewed_paths "
+            "categories, created_at, author, author_avatar_url, reviewed_paths, "
+            "prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, "
+            "cost_usd, model "
             "FROM review_events WHERE owner=%s AND repo=%s "
             "ORDER BY created_at DESC LIMIT %s",
             (self._owner, self._repo, limit),
         )
-        return [
-            ReviewEvent(
-                id=r[0],
-                pr_number=r[1],
-                pr_title=r[2],
-                pr_url=r[3],
-                comments_posted=r[4],
-                blockers=r[5],
-                warnings=r[6],
-                suggestions=r[7],
-                files_reviewed=r[8],
-                lines_changed=r[9],
-                tokens_used=r[10],
-                duration_ms=r[11],
-                categories=r[12],
-                created_at=r[13],
-                author=r[14],
-                author_avatar_url=r[15],
-                reviewed_paths=r[16],
-            )
-            for r in rows
-        ]
+        return [_pg_review_event_from_row(r) for r in rows]
 
     def list_review_events_for_pr(self, pr_number: int) -> list[ReviewEvent]:
         rows = self._fetchall(
             "SELECT id, pr_number, pr_title, pr_url, comments_posted, blockers, warnings, "
             "suggestions, files_reviewed, lines_changed, tokens_used, duration_ms, "
-            "categories, created_at, author, author_avatar_url, reviewed_paths "
+            "categories, created_at, author, author_avatar_url, reviewed_paths, "
+            "prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, "
+            "cost_usd, model "
             "FROM review_events WHERE owner=%s AND repo=%s AND pr_number=%s "
             "ORDER BY created_at DESC",
             (self._owner, self._repo, pr_number),
         )
-        return [
-            ReviewEvent(
-                id=r[0],
-                pr_number=r[1],
-                pr_title=r[2],
-                pr_url=r[3],
-                comments_posted=r[4],
-                blockers=r[5],
-                warnings=r[6],
-                suggestions=r[7],
-                files_reviewed=r[8],
-                lines_changed=r[9],
-                tokens_used=r[10],
-                duration_ms=r[11],
-                categories=r[12],
-                created_at=r[13],
-                author=r[14],
-                author_avatar_url=r[15],
-                reviewed_paths=r[16],
-            )
-            for r in rows
-        ]
+        return [_pg_review_event_from_row(r) for r in rows]
 
     def add_review_comments(
         self, review_id: int, pr_number: int, pr_url: str, comments: list[dict]
@@ -1098,7 +1131,10 @@ class PgIndexStore(_StoreSharedMixin):
             "SELECT COUNT(*), COALESCE(SUM(comments_posted),0), COALESCE(SUM(blockers),0), "
             "COALESCE(SUM(warnings),0), COALESCE(SUM(suggestions),0), "
             "COALESCE(SUM(files_reviewed),0), COALESCE(SUM(lines_changed),0), "
-            "COALESCE(SUM(tokens_used),0), COALESCE(AVG(duration_ms),0) "
+            "COALESCE(SUM(tokens_used),0), COALESCE(AVG(duration_ms),0), "
+            "COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0), "
+            "COALESCE(SUM(cached_tokens),0), COALESCE(SUM(cache_write_tokens),0), "
+            "COALESCE(SUM(cost_usd),0) "
             f"FROM review_events WHERE owner=%s AND repo=%s{since_clause}",
             tuple(params),
         )
@@ -1128,6 +1164,11 @@ class PgIndexStore(_StoreSharedMixin):
             "total_lines_changed": row[6],
             "total_tokens": row[7],
             "avg_duration_ms": int(row[8]),
+            "total_prompt_tokens": int(row[9]),
+            "total_completion_tokens": int(row[10]),
+            "total_cached_tokens": int(row[11]),
+            "total_cache_write_tokens": int(row[12]),
+            "total_cost_usd": float(row[13]),
             "categories": cat_counts,
         }
 

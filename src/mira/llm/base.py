@@ -22,6 +22,9 @@ class LLMProviderProtocol(Protocol):
 
     total_prompt_tokens: int
     total_completion_tokens: int
+    total_cached_tokens: int
+    total_cache_write_tokens: int
+    total_cost_usd: float
 
     async def complete(
         self,
@@ -54,4 +57,4 @@ class LLMProviderProtocol(Protocol):
     def count_tokens(self, text: str) -> int: ...
 
     @property
-    def usage(self) -> dict[str, int]: ...
+    def usage(self) -> dict[str, int | float | str]: ...
