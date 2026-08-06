@@ -3,7 +3,13 @@ builder = "nixpacks"
 nixpacksConfigPath = ""
 
 [build.dockerImage]
+# Upstream image lacks PAT mode. For this fork, build from Dockerfile instead
+# of pulling ghcr.io/mira-reviewer/mira:latest, or publish your own image.
 image = "ghcr.io/mira-reviewer/mira:latest"
+
+# Env (set in Railway dashboard):
+#   PAT:  MIRA_GITHUB_TOKEN, MIRA_WEBHOOK_SECRET, LLM key (OPENROUTER/CMD/OPENCODE)
+#   App:  MIRA_GITHUB_APP_ID, MIRA_GITHUB_PRIVATE_KEY, MIRA_WEBHOOK_SECRET, LLM key
 
 [deploy]
 healthcheckPath = "/health"

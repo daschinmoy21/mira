@@ -24,7 +24,7 @@ from typing import Any
 
 from github import Github, GithubException
 
-from mira.platforms.github.auth import GitHubAppAuth
+from mira.platforms.github.auth import GitHubAuth
 
 logger = logging.getLogger(__name__)
 
@@ -324,7 +324,7 @@ def _backfill_sync(
 async def backfill_repo_contributions(
     owner: str,
     repo: str,
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     *,
     installation_id: int = 0,
     since: float | None = None,
@@ -359,7 +359,7 @@ async def backfill_repo_contributions(
 
 
 async def backfill_all_repos(
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     *,
     since: float | None = None,
     include_commits: bool = True,

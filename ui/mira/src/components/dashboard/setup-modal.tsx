@@ -113,7 +113,7 @@ export function SetupModal({
 
   const accessHelp = {
     github:
-      "To change which repos Mira can access, update your GitHub App installation permissions.",
+      "To change which repos Mira can access: update your GitHub App installation, or in PAT mode ensure the token user is a collaborator and re-sync.",
     forgejo:
       "To change which repos Mira can access, update your Forgejo access token scopes.",
     gitlab:

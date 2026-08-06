@@ -1,11 +1,18 @@
 app = "mira"
 
 [build]
+  # Upstream image lacks PAT mode / Command Code / OpenCode profiles.
+  # For this fork, prefer: fly deploy --build-only  or build from Dockerfile.
   image = "ghcr.io/mira-reviewer/mira:latest"
 
 [http_service]
   internal_port = 8000
   force_https = true
+
+# Secrets (fly secrets set …):
+#   PAT mode:  MIRA_GITHUB_TOKEN  MIRA_WEBHOOK_SECRET  + LLM key
+#   App mode:  MIRA_GITHUB_APP_ID  MIRA_GITHUB_PRIVATE_KEY  MIRA_WEBHOOK_SECRET
+#   LLM:       OPENROUTER_API_KEY | CMD_API_KEY | OPENCODE_API_KEY
 
 [[services.http_checks]]
   path = "/health"

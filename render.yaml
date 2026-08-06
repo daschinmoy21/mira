@@ -3,14 +3,29 @@ services:
     name: mira
     runtime: image
     image:
+      # For this fork's PAT + provider features, build from the repo instead of
+      # the upstream image (or point at your own registry image).
       url: ghcr.io/mira-reviewer/mira:latest
     healthCheckPath: /health
     envVars:
+      # --- GitHub: pick App mode OR PAT mode ---
+      # App mode:
       - key: MIRA_GITHUB_APP_ID
         sync: false
       - key: MIRA_GITHUB_PRIVATE_KEY
         sync: false
+      # PAT mode (personal collaborator — no App install):
+      - key: MIRA_GITHUB_TOKEN
+        sync: false
+      # Required for both App and PAT webhook HMAC:
       - key: MIRA_WEBHOOK_SECRET
+        sync: false
+      # LLM — match llm.base_url / api_key_env in mira.yaml
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: CMD_API_KEY
+        sync: false
+      - key: OPENCODE_API_KEY
         sync: false
       - key: OPENAI_API_KEY
         sync: false

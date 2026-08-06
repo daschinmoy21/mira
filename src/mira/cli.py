@@ -463,12 +463,26 @@ def serve(
     default=None,
     help="owner/repo to backfill. Omit to backfill every registered repo.",
 )
-@click.option("--app-id", envvar="MIRA_GITHUB_APP_ID", required=True, help="GitHub App ID")
+@click.option(
+    "--app-id",
+    envvar="MIRA_GITHUB_APP_ID",
+    default=None,
+    help="GitHub App ID (App mode). Prefer with --private-key.",
+)
 @click.option(
     "--private-key",
     envvar="MIRA_GITHUB_PRIVATE_KEY",
-    required=True,
-    help="PEM contents or @path/to/key.pem",
+    default=None,
+    help="PEM contents or @path/to/key.pem (App mode)",
+)
+@click.option(
+    "--github-token",
+    envvar="MIRA_GITHUB_TOKEN",
+    default=None,
+    help=(
+        "GitHub PAT (PAT mode). Also accepts GITHUB_TOKEN. Used when App creds "
+        "are not set."
+    ),
 )
 @click.option(
     "--since",
@@ -483,17 +497,19 @@ def serve(
 @click.option("--verbose", is_flag=True, help="Enable verbose logging")
 def backfill_contributors(
     repo_spec: str | None,
-    app_id: str,
-    private_key: str,
+    app_id: str | None,
+    private_key: str | None,
+    github_token: str | None,
     since: str | None,
     no_commits: bool,
     verbose: bool,
 ) -> None:
     """Backfill historical contributor activity (PRs, reviews, commits) from GitHub."""
     import asyncio
+    import os
     from datetime import datetime
 
-    from mira.platforms.github.auth import GitHubAppAuth
+    from mira.platforms.github.auth import GitHubAppAuth, GitHubTokenAuth
     from mira.platforms.github.contributor_backfill import (
         backfill_all_repos,
         backfill_repo_contributions,
@@ -505,15 +521,25 @@ def backfill_contributors(
         stream=sys.stdout,
     )
 
-    if private_key.startswith("@"):
-        key_path = private_key[1:]
-        try:
-            with open(key_path) as f:
-                private_key = f.read()
-        except FileNotFoundError:
-            raise click.ClickException(f"Private key file not found: {key_path}") from None
-
-    app_auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
+    github_token = github_token or os.environ.get("GITHUB_TOKEN") or None
+    if app_id and private_key:
+        if private_key.startswith("@"):
+            key_path = private_key[1:]
+            try:
+                with open(key_path) as f:
+                    private_key = f.read()
+            except FileNotFoundError:
+                raise click.ClickException(f"Private key file not found: {key_path}") from None
+        app_auth: GitHubAppAuth | GitHubTokenAuth = GitHubAppAuth(
+            app_id=app_id, private_key=private_key
+        )
+    elif github_token:
+        app_auth = GitHubTokenAuth(github_token)
+    else:
+        raise click.ClickException(
+            "No GitHub auth configured. Provide App creds (--app-id + --private-key) "
+            "or a PAT (--github-token / MIRA_GITHUB_TOKEN / GITHUB_TOKEN)."
+        )
 
     since_epoch: float | None = None
     if since:

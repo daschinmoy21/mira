@@ -7,6 +7,7 @@ cd "$(dirname "$0")/.."
 # Load .env — keep set -a on so all vars are exported to child processes
 set -a
 if [ -f .env ]; then
+  # shellcheck disable=SC1091
   source .env
   echo "Loaded .env"
 else
@@ -20,13 +21,14 @@ sleep 1
 
 echo "=== Starting Mira ==="
 
-# Load private key from file if path is set
+# Load private key from file if path is set (App mode)
 if [ -n "$MIRA_GITHUB_PRIVATE_KEY_PATH" ]; then
   KEY_PATH="$MIRA_GITHUB_PRIVATE_KEY_PATH"
   # Try with .pem extension if file not found
   [ ! -f "$KEY_PATH" ] && [ -f "${KEY_PATH}.pem" ] && KEY_PATH="${KEY_PATH}.pem"
   if [ -f "$KEY_PATH" ]; then
-    export MIRA_GITHUB_PRIVATE_KEY=$(cat "$KEY_PATH")
+    export MIRA_GITHUB_PRIVATE_KEY
+    MIRA_GITHUB_PRIVATE_KEY=$(cat "$KEY_PATH")
     echo "Loaded GitHub private key from $KEY_PATH"
   else
     echo "WARNING: Private key file not found: $MIRA_GITHUB_PRIVATE_KEY_PATH"
@@ -34,69 +36,95 @@ if [ -n "$MIRA_GITHUB_PRIVATE_KEY_PATH" ]; then
 fi
 
 # Ensure index directory exists
+export MIRA_INDEX_DIR="${MIRA_INDEX_DIR:-./data/indexes}"
 mkdir -p "$MIRA_INDEX_DIR"
 
 # Set defaults only if not already set by .env
 export ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin}"
 export MIRA_MODEL="${MIRA_MODEL:-anthropic/claude-sonnet-4-6}"
-export MIRA_INDEX_DIR="${MIRA_INDEX_DIR:-./data/indexes}"
+
+# Resolve PAT alias for logging
+_PAT="${MIRA_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
 
 # Debug
 echo "  MIRA_GITHUB_APP_ID=${MIRA_GITHUB_APP_ID:-(not set)}"
+if [ -n "$_PAT" ]; then
+  echo "  MIRA_GITHUB_TOKEN=(set)"
+else
+  echo "  MIRA_GITHUB_TOKEN=(not set)"
+fi
 echo "  DATABASE_URL=${DATABASE_URL:-(not set)}"
 echo "  MIRA_INDEX_DIR=${MIRA_INDEX_DIR}"
 
-# Start single server (dashboard API + webhooks on same port)
+# Prefer the project venv, then uv, then PATH
+if [ -x .venv/bin/mira ]; then
+  MIRA_BIN=".venv/bin/mira"
+elif command -v uv >/dev/null 2>&1; then
+  MIRA_BIN="uv run mira"
+else
+  MIRA_BIN="mira"
+fi
+
+# Optional deployment config
+CONFIG_ARGS=()
+if [ -f mira.yaml ]; then
+  CONFIG_ARGS=(--config mira.yaml)
+  echo "  Config: mira.yaml"
+fi
+
+# Start single server (dashboard API + webhooks on same port).
+# mira serve supports App mode OR PAT mode (MIRA_GITHUB_TOKEN + MIRA_WEBHOOK_SECRET).
 echo "Starting Mira server on port 8100..."
-.venv/bin/python -c "
-import os, uvicorn
-from mira.dashboard.api import app
-
-# Mount webhook routes if GitHub App is configured
-app_id = os.environ.get('MIRA_GITHUB_APP_ID')
-private_key = os.environ.get('MIRA_GITHUB_PRIVATE_KEY')
-
-if app_id and private_key:
-    from mira.github_app.auth import GitHubAppAuth
-    from mira.github_app.webhooks import create_app as create_webhook_app
-    auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
-    webhook_app = create_webhook_app(
-        app_auth=auth,
-        webhook_secret=os.environ.get('MIRA_WEBHOOK_SECRET', ''),
-        bot_name=os.environ.get('MIRA_BOT_NAME', 'miracodeai'),
-    )
-    app.mount('/github', webhook_app)
-    print('GitHub webhooks enabled at /github/webhook')
-else:
-    print('No MIRA_GITHUB_APP_ID set — webhooks disabled')
-
-uvicorn.run(app, host='0.0.0.0', port=8100)
-" &
+# shellcheck disable=SC2086
+$MIRA_BIN serve --host 0.0.0.0 --port 8100 "${CONFIG_ARGS[@]}" &
 SERVER_PID=$!
 
 sleep 2
 
-# Start frontend
-echo "Starting frontend on port 5173..."
-cd UI/mira
-VITE_API_URL=http://localhost:8100 npm run dev &
-UI_PID=$!
-cd ../..
+# Start frontend if present (path is ui/mira in current tree)
+UI_PID=""
+if [ -d ui/mira ]; then
+  echo "Starting frontend on port 5173..."
+  (
+    cd ui/mira
+    VITE_API_URL=http://localhost:8100 npm run dev
+  ) &
+  UI_PID=$!
+elif [ -d UI/mira ]; then
+  echo "Starting frontend on port 5173..."
+  (
+    cd UI/mira
+    VITE_API_URL=http://localhost:8100 npm run dev
+  ) &
+  UI_PID=$!
+else
+  echo "No ui/mira tree — dashboard served by backend if ui_dist is built."
+fi
 
 sleep 2
 echo ""
 echo "=== Mira is running ==="
-echo "  Dashboard:  http://localhost:5173"
+echo "  Dashboard:  http://localhost:5173 (or :8100 if SPA is bundled)"
 echo "  API:        http://localhost:8100"
-if [ -n "$MIRA_GITHUB_APP_ID" ]; then
+if [ -n "$MIRA_GITHUB_APP_ID" ] || [ -n "$_PAT" ]; then
   echo "  Webhook:    http://localhost:8100/github/webhook"
   echo "  Point ngrok at: http://localhost:8100"
-  echo "  Set GitHub App webhook URL to: https://<ngrok-url>/github/webhook"
+  if [ -n "$_PAT" ] && [ -z "$MIRA_GITHUB_APP_ID" ]; then
+    echo "  Mode: PAT — set repo/org webhook to https://<ngrok-url>/github/webhook"
+  else
+    echo "  Mode: App — set GitHub App webhook URL to https://<ngrok-url>/github/webhook"
+  fi
+else
+  echo "  GitHub: not configured (set MIRA_GITHUB_TOKEN+MIRA_WEBHOOK_SECRET or App creds)"
 fi
 echo ""
 echo "  Login with: admin / ${ADMIN_PASSWORD}"
 echo ""
 echo "Press Ctrl+C to stop"
 
-trap "kill $SERVER_PID $UI_PID 2>/dev/null" EXIT
+if [ -n "$UI_PID" ]; then
+  trap "kill $SERVER_PID $UI_PID 2>/dev/null" EXIT
+else
+  trap "kill $SERVER_PID 2>/dev/null" EXIT
+fi
 wait

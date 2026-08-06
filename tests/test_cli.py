@@ -199,6 +199,38 @@ class TestCLI:
         assert result.exit_code != 0
         assert "token" in result.output.lower() or "GITHUB_TOKEN" in result.output
 
+    def test_backfill_contributors_requires_auth(self, monkeypatch):
+        for key in (
+            "MIRA_GITHUB_APP_ID",
+            "MIRA_GITHUB_PRIVATE_KEY",
+            "MIRA_GITHUB_TOKEN",
+            "GITHUB_TOKEN",
+        ):
+            monkeypatch.delenv(key, raising=False)
+        runner = CliRunner()
+        result = runner.invoke(main, ["backfill-contributors"])
+        assert result.exit_code != 0
+        out = result.output.lower()
+        assert "token" in out or "pat" in out or "app" in out or "auth" in out
+
+    def test_backfill_contributors_accepts_pat(self, monkeypatch):
+        monkeypatch.delenv("MIRA_GITHUB_APP_ID", raising=False)
+        monkeypatch.delenv("MIRA_GITHUB_PRIVATE_KEY", raising=False)
+
+        with patch(
+            "mira.platforms.github.contributor_backfill.backfill_all_repos",
+            new=AsyncMock(
+                return_value={"prs": 1, "merges": 0, "reviews": 0, "commits": 0, "repos": 1}
+            ),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                ["backfill-contributors", "--github-token", "ghp_test"],
+            )
+        assert result.exit_code == 0, result.output
+        assert "Backfill complete" in result.output
+
     def test_review_stdin_text_output(self):
         review_result = _make_result(summary="All good.")
 

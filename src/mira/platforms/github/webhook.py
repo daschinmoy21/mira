@@ -927,8 +927,7 @@ async def _count_files_for_repos(
     except Exception as exc:
         logger.warning(
             "Cannot count files for installation %s — token fetch failed (%s). "
-            "This usually means MIRA_GITHUB_APP_ID/MIRA_GITHUB_PRIVATE_KEY don't "
-            "match the installed App, or the installation has been revoked.",
+            "Check App credentials or MIRA_GITHUB_TOKEN (PAT mode).",
             installation_id,
             exc,
         )
@@ -1220,8 +1219,11 @@ async def backfill_missing_indexes(
 
         # PAT mode: no installations — discover via GET /user/repos.
         if isinstance(app_auth, GitHubTokenAuth):
+            from mira.platforms.github.contributor_backfill import get_backfill_status
+
             repos = await app_auth.list_user_repos()
             logger.info("Startup (PAT): found %d accessible repo(s)", len(repos))
+            need_contrib: list[dict[str, Any]] = []
             for repo_info in repos:
                 full_name = str(repo_info.get("full_name", ""))
                 if "/" not in full_name:
@@ -1230,11 +1232,22 @@ async def backfill_missing_indexes(
                 app_db.register_repo(owner, repo, 0)
                 app_db.set_repo_visibility(owner, repo, bool(repo_info.get("private", False)))
                 registered += 1
+                # App mode seeds contributors on install events; PAT has none —
+                # backfill once per repo until status is complete (skip restarts).
+                status = get_backfill_status(app_db, owner, repo)
+                if status.get("status") != "complete":
+                    need_contrib.append(repo_info)
             if repos:
                 import asyncio
 
                 asyncio.create_task(_count_files_for_repos(app_auth, 0, repos))
-            logger.info("Startup (PAT): registered %d repo(s)", registered)
+            if need_contrib:
+                _schedule_contributor_backfill(app_auth, 0, need_contrib)
+            logger.info(
+                "Startup (PAT): registered %d repo(s), contributor backfill for %d",
+                registered,
+                len(need_contrib),
+            )
             return
 
         installations = await app_auth.list_installations()
