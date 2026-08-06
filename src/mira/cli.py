@@ -257,7 +257,17 @@ def review(
     "--webhook-secret",
     envvar="MIRA_WEBHOOK_SECRET",
     default=None,
-    help="Webhook secret from GitHub App settings",
+    help="Webhook HMAC secret (GitHub App or repo/org webhook)",
+)
+@click.option(
+    "--github-token",
+    envvar="MIRA_GITHUB_TOKEN",
+    default=None,
+    help=(
+        "GitHub personal access token for PAT mode (collaborator reviews without a "
+        "GitHub App). Also reads GITHUB_TOKEN if MIRA_GITHUB_TOKEN is unset. "
+        "Requires --webhook-secret. App credentials take precedence when both are set."
+    ),
 )
 @click.option(
     "--gitlab-token",
@@ -319,6 +329,7 @@ def serve(
     app_id: str | None,
     private_key: str | None,
     webhook_secret: str | None,
+    github_token: str | None,
     gitlab_token: str | None,
     gitlab_webhook_secret: str | None,
     gitlab_base_url: str | None,
@@ -332,12 +343,13 @@ def serve(
     """Run the Mira webhook server for GitHub, GitLab, and/or Forgejo."""
     try:
         import asyncio
+        import os
 
         import uvicorn
 
         from mira.config import set_global_defaults
         from mira.platforms.forgejo.auth import ForgejoTokenAuth
-        from mira.platforms.github.auth import GitHubAppAuth
+        from mira.platforms.github.auth import GitHubAppAuth, GitHubTokenAuth
         from mira.platforms.gitlab.auth import GitLabTokenAuth
         from mira.platforms.server import create_app
     except ImportError as exc:
@@ -358,20 +370,25 @@ def serve(
         except Exception as exc:
             raise click.ClickException(f"Invalid --config file: {exc}") from exc
 
-    github_configured = bool(app_id and private_key and webhook_secret)
+    # Prefer App auth when fully configured; else PAT (personal collaborator mode).
+    github_token = github_token or os.environ.get("GITHUB_TOKEN") or None
+    github_app_configured = bool(app_id and private_key and webhook_secret)
+    github_pat_configured = bool(github_token and webhook_secret)
+    github_configured = github_app_configured or github_pat_configured
     gitlab_configured = bool(gitlab_token and gitlab_webhook_secret)
     forgejo_configured = bool(forgejo_token and forgejo_webhook_secret)
     if not github_configured and not gitlab_configured and not forgejo_configured:
         raise click.ClickException(
             "No platform configured. Provide GitHub App creds (--app-id, --private-key, "
-            "--webhook-secret) and/or GitLab creds (--gitlab-token, --gitlab-webhook-secret)."
+            "--webhook-secret), GitHub PAT mode (--github-token / MIRA_GITHUB_TOKEN + "
+            "--webhook-secret), and/or GitLab/Forgejo creds."
         )
 
     app_auth = None
     gitlab_auth = None
     forgejo_auth = None
 
-    if github_configured:
+    if github_app_configured:
         assert private_key is not None
         assert app_id is not None
         if private_key.startswith("@"):
@@ -382,6 +399,11 @@ def serve(
             except FileNotFoundError:
                 raise click.ClickException(f"Private key file not found: {key_path}") from None
         app_auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
+        click.echo("GitHub: App authentication")
+    elif github_pat_configured:
+        assert github_token is not None
+        app_auth = GitHubTokenAuth(github_token)
+        click.echo("GitHub: PAT authentication (personal collaborator mode)")
 
     if gitlab_configured:
         assert gitlab_token is not None

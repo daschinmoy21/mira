@@ -478,7 +478,10 @@ async def _run_initial_indexing(default_mode: str) -> None:
 
     # Resolve a GitHub token once (used for github repos). GitLab repos use
     # MIRA_GITLAB_TOKEN instead — each repo gets a fetcher for its platform.
-    github_token = os.environ.get("GITHUB_TOKEN", "")
+    github_token = (
+        os.environ.get("MIRA_GITHUB_TOKEN", "")
+        or os.environ.get("GITHUB_TOKEN", "")
+    )
     if not github_token and any(r.platform == "github" for r in to_index):
         try:
             from mira.platforms.github.auth import GitHubAppAuth
@@ -764,14 +767,22 @@ class ContributorSummary(BaseModel):
 
 
 def _build_app_auth():  # type: ignore[no-untyped-def]
-    """Construct GitHubAppAuth from env, or 400 if the App isn't configured."""
+    """Construct GitHub App or PAT auth from env, or 400 if neither is configured."""
     app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
     private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
-    if not app_id or not private_key:
-        raise HTTPException(status_code=400, detail="GitHub App not configured")
-    from mira.platforms.github.auth import GitHubAppAuth
+    if app_id and private_key:
+        from mira.platforms.github.auth import GitHubAppAuth
 
-    return GitHubAppAuth(app_id=app_id, private_key=private_key)
+        return GitHubAppAuth(app_id=app_id, private_key=private_key)
+    pat = os.environ.get("MIRA_GITHUB_TOKEN", "") or os.environ.get("GITHUB_TOKEN", "")
+    if pat:
+        from mira.platforms.github.auth import GitHubTokenAuth
+
+        return GitHubTokenAuth(pat)
+    raise HTTPException(
+        status_code=400,
+        detail="GitHub not configured (set App creds or MIRA_GITHUB_TOKEN)",
+    )
 
 
 @router.get("/api/contributors", response_model=list[ContributorListItem])

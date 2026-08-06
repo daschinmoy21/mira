@@ -59,52 +59,75 @@ def list_repos() -> list[RepoListItem]:
 
 @router.post("/api/repos/sync")
 async def sync_repos(request: Request) -> dict:
-    """Reconcile the repos table with actual GitHub App installations.
+    """Reconcile the repos table with GitHub App installations or PAT-accessible repos.
 
     Removes repos that are no longer accessible and adds any new ones.
     """
     _require_admin(request)
     app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
     private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
-    if not app_id or not private_key:
-        raise HTTPException(status_code=400, detail="GitHub App not configured")
+    pat = (
+        os.environ.get("MIRA_GITHUB_TOKEN", "")
+        or os.environ.get("GITHUB_TOKEN", "")
+    )
+    if not ((app_id and private_key) or pat):
+        raise HTTPException(
+            status_code=400,
+            detail="GitHub not configured (set App creds or MIRA_GITHUB_TOKEN)",
+        )
 
     import asyncio as _asyncio
 
-    from mira.platforms.github.auth import GitHubAppAuth
+    from mira.platforms.github.auth import GitHubAppAuth, GitHubTokenAuth
     from mira.platforms.github.webhook import _count_files_for_repos
 
-    auth = GitHubAppAuth(app_id=app_id, private_key=private_key)
+    use_pat = not (app_id and private_key)
+    auth: GitHubAppAuth | GitHubTokenAuth = (
+        GitHubTokenAuth(pat) if use_pat else GitHubAppAuth(app_id=app_id, private_key=private_key)
+    )
 
-    # Collect repos currently accessible via GitHub App
+    # Collect repos currently accessible via App installations or PAT.
     actual_repos: set[tuple[str, str]] = set()
     installations_reachable = False
     try:
-        installations = await auth.list_installations()
-        installations_reachable = True
-        for inst in installations:
-            inst_id = int(inst.get("id", 0))
-            if not inst_id:
-                continue
-            try:
-                repos_list = await auth.list_installation_repos(inst_id)
-            except Exception as exc:
-                # One installation failing shouldn't poison the whole sync — log
-                # and skip. Without this, a stale/revoked installation would
-                # cause us to treat the DB as fully empty and wipe it below.
-                logger.warning("Skipping installation %s in sync: %s", inst_id, exc)
-                continue
+        if use_pat:
+            repos_list = await auth.list_user_repos()  # type: ignore[union-attr]
+            installations_reachable = True
             for r in repos_list:
                 full_name = str(r.get("full_name", ""))
                 if "/" in full_name:
                     owner, repo = full_name.split("/", 1)
                     actual_repos.add((owner, repo))
-                    _api._app_db.register_repo(owner, repo, inst_id)
+                    _api._app_db.register_repo(owner, repo, 0)
                     _api._app_db.set_repo_visibility(owner, repo, bool(r.get("private", False)))
-            # Count files in background
-            _asyncio.create_task(_count_files_for_repos(auth, inst_id, repos_list))
+            if repos_list:
+                _asyncio.create_task(_count_files_for_repos(auth, 0, repos_list))
+        else:
+            installations = await auth.list_installations()
+            installations_reachable = True
+            for inst in installations:
+                inst_id = int(inst.get("id", 0))
+                if not inst_id:
+                    continue
+                try:
+                    repos_list = await auth.list_installation_repos(inst_id)
+                except Exception as exc:
+                    # One installation failing shouldn't poison the whole sync — log
+                    # and skip. Without this, a stale/revoked installation would
+                    # cause us to treat the DB as fully empty and wipe it below.
+                    logger.warning("Skipping installation %s in sync: %s", inst_id, exc)
+                    continue
+                for r in repos_list:
+                    full_name = str(r.get("full_name", ""))
+                    if "/" in full_name:
+                        owner, repo = full_name.split("/", 1)
+                        actual_repos.add((owner, repo))
+                        _api._app_db.register_repo(owner, repo, inst_id)
+                        _api._app_db.set_repo_visibility(owner, repo, bool(r.get("private", False)))
+                # Count files in background
+                _asyncio.create_task(_count_files_for_repos(auth, inst_id, repos_list))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to list installations: {exc}") from exc
+        raise HTTPException(status_code=500, detail=f"Failed to list GitHub repos: {exc}") from exc
 
     # Only delete DB repos when we successfully reached GitHub AND at least one
     # installation returned at least one repo. Treating "App has zero visible
@@ -468,7 +491,10 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
         if not token:
             raise HTTPException(status_code=400, detail="MIRA_FORGEJO_TOKEN is not configured.")
     else:
-        token = os.environ.get("GITHUB_TOKEN", "")
+        token = (
+            os.environ.get("MIRA_GITHUB_TOKEN", "")
+            or os.environ.get("GITHUB_TOKEN", "")
+        )
         if not token:
             try:
                 from mira.platforms.github.auth import GitHubAppAuth
@@ -491,7 +517,10 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
         if not token:
             raise HTTPException(
                 status_code=400,
-                detail="No GitHub token available. Set GITHUB_TOKEN or configure GitHub App.",
+                detail=(
+                    "No GitHub token available. Set MIRA_GITHUB_TOKEN / GITHUB_TOKEN "
+                    "or configure GitHub App."
+                ),
             )
 
     fetcher = make_fetcher(platform, token)

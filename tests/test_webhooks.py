@@ -316,6 +316,35 @@ async def test_review_comment_from_bot_self_ignored(client: AsyncClient) -> None
     assert resp.json()["status"] == "ignored"
 
 
+async def test_review_comment_from_pat_user_self_ignored() -> None:
+    """PAT mode posts as a plain User login — must still ignore self to avoid loops."""
+    from mira.platforms.github.auth import GitHubTokenAuth
+    from mira.platforms.github.webhook import dispatch_github_event
+
+    auth = GitHubTokenAuth("ghp_test")
+    auth.get_bot_identity = AsyncMock(return_value="nerd-miku")  # type: ignore[method-assign]
+    app = create_app(app_auth=auth, webhook_secret=WEBHOOK_SECRET, bot_name="nerd-miku")
+    transport = ASGITransport(app=app)
+    payload = _review_comment_payload("@nerd-miku reject", user="nerd-miku")
+    # User type (not Bot) — the PAT case
+    payload["comment"]["user"]["type"] = "User"
+    payload_bytes = json.dumps(payload).encode()
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/webhook",
+            content=payload_bytes,
+            headers={
+                "X-Hub-Signature-256": _sign(payload_bytes),
+                "X-GitHub-Event": "pull_request_review_comment",
+                "Content-Type": "application/json",
+            },
+        )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ignored"
+    # sanity: dispatch helper still importable
+    assert callable(dispatch_github_event)
+
+
 # ── pause / resume / ignore tests ────────────────────────────────────────────
 
 

@@ -1,10 +1,16 @@
-"""GitHub App JWT authentication and installation token management."""
+"""GitHub authentication: App JWT + installation tokens, or a static PAT.
+
+``GitHubAppAuth`` is the upstream installation model. ``GitHubTokenAuth`` is the
+personal-deploy path — a long-lived PAT for a collaborator user account,
+matching GitLabTokenAuth / ForgejoTokenAuth.
+"""
 
 from __future__ import annotations
 
 import logging
 import os
 import time
+from typing import Union
 
 import httpx
 import jwt
@@ -31,6 +37,102 @@ def _resolve_private_key(value: str) -> str:
         with open(value[1:]) as f:
             return f.read()
     return value
+
+
+def _github_api_url() -> str:
+    return os.environ.get("MIRA_GITHUB_API_URL", "https://api.github.com").rstrip("/")
+
+
+class GitHubTokenAuth:
+    """Static personal access token. No minting, no expiry handling.
+
+    Implements the same surface handlers expect from ``GitHubAppAuth``:
+    ``get_token`` / ``get_installation_token`` (shim — always the PAT),
+    ``get_bot_identity`` (``GET /user`` → login), and repo listing for dashboard
+    discovery without App installations.
+    """
+
+    def __init__(self, token: str, api_url: str | None = None) -> None:
+        self._token = token
+        self._api_url = (api_url or _github_api_url()).rstrip("/")
+        self._username_fetched = False
+        self._username: str | None = None
+
+    async def get_token(self, scope: str | int | None = None) -> str:
+        return self._token
+
+    async def get_installation_token(self, installation_id: int) -> str:
+        """Compat shim — webhook handlers always call this; ignore installation_id."""
+        return self._token
+
+    async def get_bot_identity(self) -> str | None:
+        """The PAT user's login via ``GET /user`` (cached)."""
+        if self._username_fetched:
+            return self._username
+        self._username_fetched = True
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Accept": "application/vnd.github+json",
+        }
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{self._api_url}/user", headers=headers, timeout=10.0
+                )
+                if resp.status_code == 200:
+                    login = resp.json().get("login")
+                    self._username = login if isinstance(login, str) and login else None
+                else:
+                    logger.warning(
+                        "Failed to resolve GitHub PAT identity (HTTP %d): %s",
+                        resp.status_code,
+                        resp.text[:200],
+                    )
+                    self._username = None
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("Failed to resolve GitHub PAT identity: %s", exc)
+            self._username = None
+        return self._username
+
+    async def list_installations(self) -> list[dict[str, object]]:
+        """No installations in PAT mode — discovery uses ``list_user_repos``."""
+        return []
+
+    async def list_installation_repos(self, installation_id: int) -> list[dict[str, object]]:
+        """Ignore installation id; list repos the PAT can access."""
+        return await self.list_user_repos()
+
+    async def list_user_repos(self) -> list[dict[str, object]]:
+        """Paginate ``GET /user/repos`` for owner/collaborator/org membership."""
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Accept": "application/vnd.github+json",
+        }
+        repos: list[dict[str, object]] = []
+        url: str | None = (
+            f"{self._api_url}/user/repos"
+            f"?per_page=100&affiliation=owner,collaborator,organization_member"
+            f"&sort=updated"
+        )
+        async with httpx.AsyncClient() as client:
+            while url:
+                resp = await client.get(url, headers=headers, timeout=30.0)
+                if resp.status_code != 200:
+                    logger.warning(
+                        "Failed to list user repos (HTTP %d): %s",
+                        resp.status_code,
+                        resp.text[:200],
+                    )
+                    break
+                batch = resp.json()
+                if isinstance(batch, list):
+                    repos.extend(batch)
+                url = _parse_next_link(resp.headers.get("link", ""))
+        return repos
+
+
+# Union used by webhook handlers / server wiring (App or PAT).
+GitHubAuth = Union["GitHubAppAuth", GitHubTokenAuth]
 
 
 class GitHubAppAuth:

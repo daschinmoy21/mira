@@ -10,5 +10,29 @@
       "X-Title": "Mira Code Reviewer"
     },
     "reasoning_effort_map": { "max": "xhigh" }
+  },
+
+  "commandcode": {
+    "base_url": "https://api.commandcode.ai/provider/v1",
+    "api_key_env": "CMD_API_KEY",
+    "model_prefix": "keep",
+    "extra_headers": {},
+    "reasoning_effort_map": {}
+  },
+
+  "opencode-go": {
+    "base_url": "https://opencode.ai/zen/go/v1",
+    "api_key_env": "OPENCODE_API_KEY",
+    "model_prefix": "strip",
+    "extra_headers": {},
+    "reasoning_effort_map": {}
+  },
+
+  "opencode-zen": {
+    "base_url": "https://opencode.ai/zen/v1",
+    "api_key_env": "OPENCODE_API_KEY",
+    "model_prefix": "strip",
+    "extra_headers": {},
+    "reasoning_effort_map": {}
   }
 }

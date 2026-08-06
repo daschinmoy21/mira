@@ -21,7 +21,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from mira.platforms.github.auth import GitHubAppAuth
+from mira.platforms.github.auth import GitHubAuth
 from mira.platforms.github.webhook import (
     _verify_signature,
     backfill_missing_indexes,
@@ -40,7 +40,7 @@ def _json_status(status: str) -> Response:
 
 
 def create_app(
-    app_auth: GitHubAppAuth | None = None,
+    app_auth: GitHubAuth | None = None,
     webhook_secret: str | None = None,
     bot_name: str = "miracodeai",
     *,
@@ -52,6 +52,9 @@ def create_app(
     """Create the FastAPI app. GitHub (``app_auth`` + ``webhook_secret``) and
     GitLab (``gitlab_auth`` + ``gitlab_webhook_secret``) routes each activate
     only when their creds are supplied, so a deployment can serve one or both.
+
+    ``app_auth`` may be ``GitHubAppAuth`` (installation tokens) or
+    ``GitHubTokenAuth`` (personal access token for collaborator reviews).
     """
     if not _SAFE_BOT_NAME.match(bot_name):
         raise ValueError(f"Invalid bot_name {bot_name!r}: must match [a-zA-Z0-9_-]+")

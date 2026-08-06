@@ -19,7 +19,7 @@ from mira.index.indexer import _should_index
 from mira.index.store import IndexStore
 from mira.models import PRInfo
 from mira.platforms.fetch import make_fetcher
-from mira.platforms.github.auth import GitHubAppAuth
+from mira.platforms.github.auth import GitHubAuth, GitHubTokenAuth
 from mira.platforms.handlers import (
     _PAUSE_KEYWORDS,
     _REJECT_KEYWORDS,
@@ -61,6 +61,26 @@ def _is_bot_user(user: dict[str, Any]) -> bool:
     """Whether a GitHub user object is a bot account."""
     login = user.get("login") or ""
     return user.get("type") == "Bot" or login.endswith("[bot]")
+
+
+async def _is_self_login(auth: GitHubAuth, bot_name: str, login: str) -> bool:
+    """True if ``login`` is Mira itself (App ``name[bot]`` or PAT user login).
+
+    GitHub Apps post as ``{slug}[bot]``; a PAT user posts as their plain login
+    with ``type=User``. Without matching both, PAT mode re-handles its own
+    comments and enters a review loop.
+    """
+    if not login:
+        return False
+    names = {bot_name, f"{bot_name}[bot]"}
+    try:
+        identity = await auth.get_bot_identity()
+    except Exception as exc:  # never let identity lookup break dispatch
+        logger.debug("bot identity lookup failed: %s", exc)
+        identity = None
+    if identity:
+        names |= {identity, f"{identity}[bot]"}
+    return login in names
 
 
 def _record_pr_contribution(payload: dict[str, Any], kind: str) -> None:
@@ -149,7 +169,7 @@ def _record_pr_lifecycle(payload: dict[str, Any]) -> None:
 
 async def handle_pr_review_meta(
     payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     bot_name: str,
 ) -> None:
     """Track PR review lifecycle for any pull_request event: keep the PR row
@@ -178,7 +198,7 @@ async def handle_pr_review_meta(
 
 async def _classify_bare_approval(
     payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     owner: str,
     name: str,
     number: int,
@@ -216,7 +236,7 @@ async def _classify_bare_approval(
 
 async def handle_pull_request_review(
     payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     bot_name: str,
 ) -> None:
     """Handle a submitted human review: record responsiveness + the review
@@ -315,7 +335,7 @@ def _record_push_commits(payload: dict[str, Any]) -> None:
 
 
 def _schedule_contributor_backfill(
-    app_auth: GitHubAppAuth, installation_id: int, repos: list[dict[str, Any]]
+    app_auth: GitHubAuth, installation_id: int, repos: list[dict[str, Any]]
 ) -> None:
     """Kick off a one-time historical contributor backfill for newly added
     repos. Runs in the background, one repo at a time to spare the API budget."""
@@ -372,7 +392,7 @@ def _record_human_reply(owner: str, repo: str, number: int, pr_url: str, comment
 
 async def _handle_thread_freeform_reply(
     payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     bot_name: str,
 ) -> None:
     """GitHub adapter for the free-form thread reply (see run_thread_reply)."""
@@ -436,7 +456,7 @@ def _verify_signature(payload_bytes: bytes, signature_header: str, secret: str) 
 async def dispatch_github_event(
     event: str,
     payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     bot_name: str,
     background_tasks: BackgroundTasks,
 ) -> str:
@@ -452,12 +472,16 @@ async def dispatch_github_event(
     # ready/review_requested/...), independent of the review-trigger logic
     # below — so review-insights data stays current even for paused/ignored
     # PRs. Doesn't return; falls through to the review-trigger branches.
-    if event == "pull_request" and payload.get("sender", {}).get("login", "") != f"{bot_name}[bot]":
+    if event == "pull_request" and not await _is_self_login(
+        app_auth, bot_name, payload.get("sender", {}).get("login", "")
+    ):
         background_tasks.add_task(handle_pr_review_meta, payload, app_auth, bot_name)
 
     # A human submitted a review — capture responsiveness + the review event.
     if event == "pull_request_review" and action == "submitted":
-        if payload.get("sender", {}).get("login", "") != f"{bot_name}[bot]":
+        if not await _is_self_login(
+            app_auth, bot_name, payload.get("sender", {}).get("login", "")
+        ):
             background_tasks.add_task(handle_pull_request_review, payload, app_auth, bot_name)
         return "processing"
 
@@ -466,14 +490,16 @@ async def dispatch_github_event(
         and action in _PR_MERGE_ACTIONS
         and payload.get("pull_request", {}).get("merged")
     ):
-        if payload.get("sender", {}).get("login", "") == f"{bot_name}[bot]":
+        if await _is_self_login(
+            app_auth, bot_name, payload.get("sender", {}).get("login", "")
+        ):
             return "ignored"
         background_tasks.add_task(handle_pr_merged, payload, app_auth, bot_name)
         return "processing"
 
     if event == "pull_request" and action in _PR_ACTIONS:
         sender = payload.get("sender", {}).get("login", "")
-        if sender == f"{bot_name}[bot]":
+        if await _is_self_login(app_auth, bot_name, sender):
             logger.debug("Ignoring pull_request event from self (%s)", sender)
             return "ignored"
 
@@ -515,8 +541,8 @@ async def dispatch_github_event(
         comment_body = payload.get("comment", {}).get("body", "")
         comment_user = payload.get("comment", {}).get("user", {}).get("login", "")
         comment_user_type = payload.get("comment", {}).get("user", {}).get("type", "")
-        if comment_user_type == "Bot" or comment_user == f"{bot_name}[bot]":
-            logger.debug("Ignoring comment from bot (%s)", comment_user)
+        if comment_user_type == "Bot" or await _is_self_login(app_auth, bot_name, comment_user):
+            logger.debug("Ignoring comment from bot/self (%s)", comment_user)
             return "ignored"
         names = mention_names(bot_name, await app_auth.get_bot_identity())
         if "pull_request" in payload.get("issue", {}) and has_mention(comment_body, names):
@@ -543,8 +569,8 @@ async def dispatch_github_event(
         rc_body = payload.get("comment", {}).get("body", "")
         rc_user = payload.get("comment", {}).get("user", {}).get("login", "")
         rc_user_type = payload.get("comment", {}).get("user", {}).get("type", "")
-        if rc_user_type == "Bot" or rc_user == f"{bot_name}[bot]":
-            logger.debug("Ignoring review comment from bot (%s)", rc_user)
+        if rc_user_type == "Bot" or await _is_self_login(app_auth, bot_name, rc_user):
+            logger.debug("Ignoring review comment from bot/self (%s)", rc_user)
             return "ignored"
         names = mention_names(bot_name, await app_auth.get_bot_identity())
         if has_mention(rc_body, names):
@@ -580,7 +606,7 @@ async def dispatch_github_event(
 
 async def handle_pull_request(
     payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     bot_name: str,
 ) -> None:
     """Handle a pull_request event by running a full review."""
@@ -627,7 +653,7 @@ async def handle_pull_request(
 
 async def handle_comment(
     payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     bot_name: str,
 ) -> None:
     """Handle an issue_comment event mentioning the bot."""
@@ -663,7 +689,7 @@ async def handle_comment(
 
 async def handle_thread_reject(
     payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     bot_name: str,
 ) -> None:
     """Handle a pull_request_review_comment that rejects a review thread."""
@@ -798,7 +824,7 @@ async def handle_thread_reject(
 
 async def handle_pr_merged(
     payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     bot_name: str,
 ) -> None:
     """Learn from a merged PR by extracting accept/reject + human-review signals."""
@@ -842,7 +868,7 @@ async def handle_pr_merged(
 
 async def handle_pause_resume(
     payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     bot_name: str,
     command: str,
 ) -> None:
@@ -891,7 +917,7 @@ async def handle_pause_resume(
 
 
 async def _count_files_for_repos(
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     installation_id: int,
     repos: list[dict],
 ) -> None:
@@ -930,7 +956,7 @@ async def _count_files_for_repos(
 
 async def handle_installation(
     payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     bot_name: str,
 ) -> None:
     """Handle installation.created — register all repos (no indexing until user confirms)."""
@@ -984,7 +1010,7 @@ async def handle_installation(
 
 async def handle_installation_deleted(
     payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     bot_name: str,
 ) -> None:
     """Handle installation.deleted — queue pending uninstall (keep data until user decides)."""
@@ -1010,7 +1036,7 @@ async def handle_installation_deleted(
 
 async def handle_repos_removed(
     payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     bot_name: str,
 ) -> None:
     """Handle installation_repositories.removed — remove specific repos."""
@@ -1032,7 +1058,7 @@ async def handle_repos_removed(
 
 async def handle_repos_added(
     payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     bot_name: str,
 ) -> None:
     """Handle installation_repositories.added — register newly added repos."""
@@ -1073,7 +1099,7 @@ async def handle_repos_added(
 
 async def handle_push_index(
     payload: dict[str, Any],
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
     bot_name: str,
 ) -> None:
     """Handle push to default branch — incremental index of changed files.
@@ -1177,9 +1203,9 @@ def _reconcile_repo_statuses() -> None:
 
 
 async def backfill_missing_indexes(
-    app_auth: GitHubAppAuth,
+    app_auth: GitHubAuth,
 ) -> None:
-    """Register all repos from GitHub App installations.
+    """Register repos from App installations or (PAT mode) the token user's repos.
 
     Called at server startup. Only registers repos — does not start indexing.
     Indexing is user-initiated via the setup page.
@@ -1189,11 +1215,30 @@ async def backfill_missing_indexes(
         # that crashed or was restarted mid-flight.
         _reconcile_repo_statuses()
 
-        installations = await app_auth.list_installations()
-        logger.info("Startup: found %d installation(s)", len(installations))
-
         app_db = _get_app_db()
         registered = 0
+
+        # PAT mode: no installations — discover via GET /user/repos.
+        if isinstance(app_auth, GitHubTokenAuth):
+            repos = await app_auth.list_user_repos()
+            logger.info("Startup (PAT): found %d accessible repo(s)", len(repos))
+            for repo_info in repos:
+                full_name = str(repo_info.get("full_name", ""))
+                if "/" not in full_name:
+                    continue
+                owner, repo = full_name.split("/", 1)
+                app_db.register_repo(owner, repo, 0)
+                app_db.set_repo_visibility(owner, repo, bool(repo_info.get("private", False)))
+                registered += 1
+            if repos:
+                import asyncio
+
+                asyncio.create_task(_count_files_for_repos(app_auth, 0, repos))
+            logger.info("Startup (PAT): registered %d repo(s)", registered)
+            return
+
+        installations = await app_auth.list_installations()
+        logger.info("Startup: found %d installation(s)", len(installations))
 
         for inst in installations:
             raw_id = inst.get("id", 0)

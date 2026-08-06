@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from mira.exceptions import WebhookError
-from mira.platforms.github.auth import GitHubAppAuth
+from mira.platforms.github.auth import GitHubAppAuth, GitHubTokenAuth
 
 
 @pytest.fixture
@@ -209,3 +209,91 @@ async def test_get_app_slug_network_error_returns_none(
     monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
 
     assert await app_auth.get_app_slug() is None
+
+
+# --- PAT / GitHubTokenAuth -------------------------------------------------
+
+
+async def test_token_auth_get_token_and_installation_shim() -> None:
+    auth = GitHubTokenAuth("ghp_test_pat")
+    assert await auth.get_token() == "ghp_test_pat"
+    # installation_id is ignored — same PAT every time
+    assert await auth.get_installation_token(0) == "ghp_test_pat"
+    assert await auth.get_installation_token(999) == "ghp_test_pat"
+
+
+async def test_token_auth_bot_identity_from_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def mock_get(self, url, **kwargs):  # noqa: ANN001, ANN003
+        assert url.endswith("/user")
+
+        class MockResponse:
+            status_code = 200
+
+            def json(self) -> dict:
+                return {"login": "nerd-miku", "type": "User"}
+
+        return MockResponse()
+
+    import httpx
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+    auth = GitHubTokenAuth("ghp_test_pat")
+    assert await auth.get_bot_identity() == "nerd-miku"
+    # Cached
+    assert await auth.get_bot_identity() == "nerd-miku"
+
+
+async def test_token_auth_bot_identity_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def mock_get(self, url, **kwargs):  # noqa: ANN001, ANN003
+        class MockResponse:
+            status_code = 401
+            text = "Bad credentials"
+
+        return MockResponse()
+
+    import httpx
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+    auth = GitHubTokenAuth("ghp_bad")
+    assert await auth.get_bot_identity() is None
+
+
+async def test_token_auth_list_user_repos_paginates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def mock_get(self, url, **kwargs):  # noqa: ANN001, ANN003
+        calls.append(str(url))
+
+        class MockResponse:
+            def __init__(self, page: int) -> None:
+                self._page = page
+                self.status_code = 200
+                if page == 1:
+                    self.headers = {
+                        "link": '<https://api.github.com/user/repos?page=2>; rel="next"'
+                    }
+                else:
+                    self.headers = {"link": ""}
+
+            def json(self) -> list:
+                if self._page == 1:
+                    return [{"full_name": "me/a", "private": False}]
+                return [{"full_name": "me/b", "private": True}]
+
+        return MockResponse(1 if "page=2" not in str(url) else 2)
+
+    import httpx
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+    auth = GitHubTokenAuth("ghp_test_pat")
+    repos = await auth.list_user_repos()
+    assert [r["full_name"] for r in repos] == ["me/a", "me/b"]
+    assert await auth.list_installations() == []
+    # Compat: list_installation_repos delegates to user repos
+    assert len(await auth.list_installation_repos(0)) == 2

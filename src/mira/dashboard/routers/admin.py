@@ -412,11 +412,15 @@ async def get_setup_status() -> dict:
     """Check if initial setup has been completed. Auto-syncs repos from GitHub if none registered."""
     repo_count = len(_api._app_db.list_repos())
 
-    # If no repos registered, try to sync from GitHub App
+    # If no repos registered, try to sync from GitHub App or PAT
     if repo_count == 0:
         try:
             app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
             private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
+            pat = (
+                os.environ.get("MIRA_GITHUB_TOKEN", "")
+                or os.environ.get("GITHUB_TOKEN", "")
+            )
             if app_id and private_key:
                 import asyncio as _asyncio
 
@@ -442,6 +446,26 @@ async def get_setup_status() -> dict:
                     # Count files in background
                     _asyncio.create_task(_count_files_for_repos(auth, inst_id, repos_list))
                 logger.info("Synced %d repos from GitHub App", repo_count)
+            elif pat:
+                import asyncio as _asyncio
+
+                from mira.platforms.github.auth import GitHubTokenAuth
+                from mira.platforms.github.webhook import _count_files_for_repos
+
+                auth = GitHubTokenAuth(pat)
+                repos_list = await auth.list_user_repos()
+                for r in repos_list:
+                    full_name = str(r.get("full_name", ""))
+                    if "/" in full_name:
+                        owner, repo = full_name.split("/", 1)
+                        _api._app_db.register_repo(owner, repo, 0)
+                        _api._app_db.set_repo_visibility(
+                            owner, repo, bool(r.get("private", False))
+                        )
+                        repo_count += 1
+                if repos_list:
+                    _asyncio.create_task(_count_files_for_repos(auth, 0, repos_list))
+                logger.info("Synced %d repos from GitHub PAT", repo_count)
         except Exception as exc:
             logger.warning("Failed to sync repos from GitHub: %s", exc)
 

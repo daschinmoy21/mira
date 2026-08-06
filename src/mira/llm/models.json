@@ -220,5 +220,38 @@
     "supports_json_mode": false,
     "purposes": ["review"],
     "recommended_for": []
+  },
+  "kimi-k2.7-code": {
+    "label": "Kimi K2.7 Code (OpenCode Go)",
+    "provider": "opencode-go",
+    "max_input_tokens": 262144,
+    "max_output_tokens": 65536,
+    "input_cost_per_1m": 0.95,
+    "output_cost_per_1m": 4.00,
+    "supports_json_mode": true,
+    "purposes": ["indexing", "review"],
+    "recommended_for": []
+  },
+  "deepseek-v4-flash": {
+    "label": "DeepSeek V4 Flash (OpenCode Go)",
+    "provider": "opencode-go",
+    "max_input_tokens": 1048576,
+    "max_output_tokens": 16384,
+    "input_cost_per_1m": 0.14,
+    "output_cost_per_1m": 0.28,
+    "supports_json_mode": true,
+    "purposes": ["indexing"],
+    "recommended_for": []
+  },
+  "minimax-m2.7": {
+    "label": "MiniMax M2.7 (OpenCode Go)",
+    "provider": "opencode-go",
+    "max_input_tokens": 1048576,
+    "max_output_tokens": 512000,
+    "input_cost_per_1m": 0.30,
+    "output_cost_per_1m": 1.20,
+    "supports_json_mode": true,
+    "purposes": ["indexing", "review"],
+    "recommended_for": []
   }
 }

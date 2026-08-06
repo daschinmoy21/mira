@@ -15,6 +15,23 @@ class TestResolve:
         assert p["extra_headers"]["X-Title"] == "Mira Code Reviewer"
         assert p["reasoning_effort_map"] == {"max": "xhigh"}
 
+    def test_matches_commandcode(self):
+        p = profiles.resolve("https://api.commandcode.ai/provider/v1")
+        assert p["name"] == "commandcode"
+        assert p["api_key_env"] == "CMD_API_KEY"
+        assert p["model_prefix"] == "keep"
+
+    def test_matches_opencode_go(self):
+        p = profiles.resolve("https://opencode.ai/zen/go/v1")
+        assert p["name"] == "opencode-go"
+        assert p["api_key_env"] == "OPENCODE_API_KEY"
+        assert p["model_prefix"] == "strip"
+
+    def test_matches_opencode_zen(self):
+        p = profiles.resolve("https://opencode.ai/zen/v1")
+        assert p["name"] == "opencode-zen"
+        assert p["api_key_env"] == "OPENCODE_API_KEY"
+
     def test_trailing_slash_insensitive(self):
         assert profiles.resolve("https://openrouter.ai/api/v1/")["name"] == "openrouter"
 

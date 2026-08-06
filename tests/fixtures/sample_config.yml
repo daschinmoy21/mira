@@ -1,7 +1,38 @@
+# Deployment-wide defaults (load with: mira serve --config mira.yaml).
+# Every key is optional. Per-repo `.mira.yaml` deep-merges over this.
+
 llm:
+  # Default: OpenRouter (set OPENROUTER_API_KEY in the environment).
   model: "openai/gpt-4o-mini"
+  # indexing_model: "anthropic/claude-haiku-4-5"
+  # review_model: "anthropic/claude-sonnet-4-6"
   temperature: 0.1
   max_tokens: 2048
+  # base_url: "https://openrouter.ai/api/v1"
+  # api_key_env: "OPENROUTER_API_KEY"
+
+  # --- Command Code Provider API (https://commandcode.ai/docs/provider) ---
+  # OpenAI-compatible chat completions. Set CMD_API_KEY in the environment.
+  # base_url: "https://api.commandcode.ai/provider/v1"
+  # api_key_env: "CMD_API_KEY"
+  # model: "deepseek/deepseek-v4-flash"
+  # indexing_model: "deepseek/deepseek-v4-flash"
+  # review_model: "deepseek/deepseek-v4-pro"
+
+  # --- OpenCode Go (https://opencode.ai/docs/go/) ---
+  # Subscription models via OpenAI-compatible chat completions.
+  # Set OPENCODE_API_KEY (from https://opencode.ai/auth).
+  # Prefer models that expose /chat/completions (not Anthropic /messages only).
+  # base_url: "https://opencode.ai/zen/go/v1"
+  # api_key_env: "OPENCODE_API_KEY"
+  # model: "kimi-k2.7-code"
+  # indexing_model: "deepseek-v4-flash"
+  # review_model: "kimi-k2.7-code"
+
+  # --- OpenCode Zen (pay-as-you-go; same OPENCODE_API_KEY) ---
+  # base_url: "https://opencode.ai/zen/v1"
+  # api_key_env: "OPENCODE_API_KEY"
+  # model: "…"  # see https://opencode.ai/docs/zen/
 
 filter:
   confidence_threshold: 0.8

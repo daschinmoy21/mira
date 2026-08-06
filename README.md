@@ -91,23 +91,55 @@ Run Mira self-hosted to auto-review every PR and merge request and answer `@mira
 llm:
   model: "anthropic/claude-sonnet-4-6"
   indexing_model: "anthropic/claude-haiku-4-5"
+  # base_url / api_key_env default to OpenRouter. Alternatives (uncomment one):
+  #
+  # Command Code — https://commandcode.ai/docs/provider  (env: CMD_API_KEY)
+  # base_url: "https://api.commandcode.ai/provider/v1"
+  # api_key_env: "CMD_API_KEY"
+  # model: "deepseek/deepseek-v4-flash"
+  #
+  # OpenCode Go — https://opencode.ai/docs/go/  (env: OPENCODE_API_KEY)
+  # base_url: "https://opencode.ai/zen/go/v1"
+  # api_key_env: "OPENCODE_API_KEY"
+  # model: "kimi-k2.7-code"
+  # indexing_model: "deepseek-v4-flash"
+  #
+  # OpenCode Zen (pay-as-you-go; same OPENCODE_API_KEY)
+  # base_url: "https://opencode.ai/zen/v1"
+  # api_key_env: "OPENCODE_API_KEY"
 ```
 
 ```bash
 # .env — secrets only.
-MIRA_GITHUB_APP_ID=123456
-MIRA_GITHUB_PRIVATE_KEY="$(cat private-key.pem)"
+# --- GitHub App mode (upstream) ---
+# MIRA_GITHUB_APP_ID=123456
+# MIRA_GITHUB_PRIVATE_KEY="$(cat private-key.pem)"
+# --- GitHub PAT mode (personal collaborator; no App) ---
+MIRA_GITHUB_TOKEN=ghp_...
 MIRA_WEBHOOK_SECRET=your-secret
+# LLM (pick the key that matches llm.api_key_env / base_url above)
 OPENROUTER_API_KEY=sk-or-...
+# CMD_API_KEY=...
+# OPENCODE_API_KEY=...
 ```
 
 ```bash
+# Official image (App mode as upstream):
+# docker run -p 8000:8000 --env-file .env \
+#   -v "$(pwd)/mira.yaml:/app/mira.yaml" \
+#   ghcr.io/miracodeai/mira:latest --config /app/mira.yaml
+
+# This fork (PAT + Command Code / OpenCode profiles) — build locally:
+docker build -t mira:local .
 docker run -p 8000:8000 --env-file .env \
   -v "$(pwd)/mira.yaml:/app/mira.yaml" \
-  ghcr.io/miracodeai/mira:latest --config /app/mira.yaml
+  mira:local --config /app/mira.yaml
 ```
 
-**2. Install the app** on your repos — every PR gets reviewed.
+**2. Connect GitHub**
+
+- **App mode:** install the GitHub App on your repos (upstream docs).
+- **PAT mode (this fork):** add the PAT user as a collaborator on each target repo; create a **repo or org webhook** → `https://<your-host>/github/webhook` with the same `MIRA_WEBHOOK_SECRET`, events: `pull_request`, `issue_comment`, `pull_request_review`, `pull_request_review_comment`, `push`.
 
 → Full walkthrough: [creating the GitHub App & quickstart](https://docs.miracode.ai/quickstart) · [GitLab setup](https://docs.miracode.ai/gitlab) · [deploy options](https://docs.miracode.ai/deployment) · [choosing models, custom endpoints & AWS Bedrock](https://docs.miracode.ai/configuration/models)
 

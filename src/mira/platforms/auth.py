@@ -1,10 +1,10 @@
 """Platform authentication abstraction.
 
-GitHub uses an App-installation model that mints short-lived per-installation
-tokens; GitLab uses a long-lived group/project access token. Both satisfy
-``PlatformAuth`` so handlers can fetch a token and the bot's identity without
-knowing which platform they're on. The concrete implementations live next to
-each platform's webhook code (``platforms.github.auth`` / ``platforms.gitlab.auth``).
+GitHub uses either an App-installation model (short-lived per-installation
+tokens) or a static personal access token (``GitHubTokenAuth``). GitLab and
+Forgejo use long-lived access tokens. All satisfy ``PlatformAuth`` so handlers
+can fetch a token and the bot's identity without knowing which platform they're
+on. Concrete implementations live next to each platform's webhook code.
 """
 
 from __future__ import annotations
