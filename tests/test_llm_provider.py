@@ -578,6 +578,39 @@ class TestToolChoiceFallback:
             )
         assert "anthropic/claude-sonnet-4-6" not in provider._no_forced_tool_choice
 
+    @pytest.mark.asyncio
+    async def test_retries_with_auto_on_opaque_empty_assistant_400(self):
+        # OpenCode Go gpt-5.6-luna: forced tool_choice → 400 with empty
+        # assistant message and no error body (no "tool_choice" string).
+        provider = LLMProvider(LLMConfig(model="gpt-5.6-luna"))
+        rejected = _mock_httpx_response(
+            {
+                "id": "chatcmpl_test",
+                "object": "chat.completion",
+                "model": "gpt-5.6-luna",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant"},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            status_code=400,
+        )
+        ok = _mock_httpx_response(_make_tool_response_json('{"comments": []}'))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as cls:
+            cls.return_value = self._client([rejected, ok])
+            result = await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}], tools=[self._TOOL]
+            )
+            n_posts = len(cls.return_value.post.call_args_list)
+
+        assert result == '{"comments": []}'
+        assert n_posts == 2
+        assert "gpt-5.6-luna" in provider._no_forced_tool_choice
+
 
 class TestReasoningFallback:
     """Thinking mode is opt-in and applied to whatever model is selected; a

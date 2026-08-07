@@ -75,6 +75,38 @@ def _retriable(exception: BaseException) -> bool:
     )
 
 
+def _forced_tool_choice_rejected(resp: httpx.Response) -> bool:
+    """True when a 400 looks like a forced ``tool_choice`` rejection.
+
+    DeepSeek thinking mode includes ``tool_choice`` in the error body. OpenCode
+    Go (e.g. ``gpt-5.6-luna``) instead returns HTTP 400 with an empty assistant
+    message and no explanation — same root cause, no string to match.
+    """
+    if resp.status_code != 400:
+        return False
+    text = resp.text or ""
+    if "tool_choice" in text.lower():
+        return True
+    try:
+        data = resp.json()
+    except Exception:
+        return False
+    # Explicit error object without mentioning tool_choice is some other fault
+    # (context length, bad schema, etc.) — do not treat as tool_choice rejection.
+    if data.get("error"):
+        return False
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    if message.get("role") != "assistant":
+        return False
+    if message.get("content") or message.get("tool_calls"):
+        return False
+    return choice.get("finish_reason") is None
+
+
 class LLMProvider:
     """OpenAI-compatible API client for LLM completions."""
 
@@ -221,11 +253,7 @@ class LLMProvider:
                 headers=self._build_headers(),
                 json=body,
             )
-            if (
-                resp.status_code == 400
-                and body["tool_choice"] != "auto"
-                and "tool_choice" in resp.text.lower()
-            ):
+            if body["tool_choice"] != "auto" and _forced_tool_choice_rejected(resp):
                 # Forced choice unsupported — remember it and let the model pick.
                 logger.info("Model %s rejected forced tool_choice; retrying with auto", api_model)
                 self._no_forced_tool_choice.add(api_model)
