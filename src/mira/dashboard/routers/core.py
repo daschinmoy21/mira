@@ -60,23 +60,23 @@ def get_indexing_status() -> list[IndexStatusModel]:
 
 
 @router.get("/api/indexing/estimate", response_model=CostEstimate)
-def estimate_cost() -> CostEstimate:
-    """Estimate the cost of indexing all pending repos with the current model."""
+async def estimate_cost() -> CostEstimate:
+    """Estimate indexing cost using the configured backend's model pricing."""
     from mira.config import load_config
-    from mira.dashboard.models_config import (
-        estimate_indexing_cost,
-        get_indexing_model,
-    )
+    from mira.dashboard.model_catalog import fetch_catalog
+    from mira.dashboard.models_config import estimate_indexing_cost, get_indexing_model
 
     config = load_config()
     model = get_indexing_model(config.llm, _api._app_db.get_setting("indexing_model"))
-
-    # Sum file counts across all pending repos
     total_files = sum(
         r.file_count_estimate for r in _api._app_db.list_repos() if r.status == "pending"
     )
-
-    est = estimate_indexing_cost(total_files, model)
+    catalog = await fetch_catalog(config.llm)
+    live = next((item for item in (catalog or []) if item.get("value") == model), None)
+    pricing = None
+    if live and "input_cost_per_1m" in live and "output_cost_per_1m" in live:
+        pricing = (live["input_cost_per_1m"], live["output_cost_per_1m"])
+    est = estimate_indexing_cost(total_files, model, pricing=pricing)
     return CostEstimate(
         estimated_usd=est["estimated_usd"],
         input_tokens=est["input_tokens"],

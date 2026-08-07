@@ -33,33 +33,24 @@ THINKING_MODES: list[dict[str, str]] = [
 THINKING_MODE_VALUES = {m["value"] for m in THINKING_MODES}
 
 
-def estimate_indexing_cost(file_count: int, model: str) -> dict:
-    """Estimate cost of indexing N files with the given model.
-
-    Based on actual indexer behavior:
-    - Files batched 5-at-a-time
-    - Each batch uses ~4K input tokens (prompt + 5 file contents ~500 lines avg)
-    - Each batch outputs ~2K tokens (summaries + symbols JSON)
-    - Plus a directory summarization pass at the end (~1 call per 10 files)
-    """
+def estimate_indexing_cost(
+    file_count: int,
+    model: str,
+    pricing: tuple[float, float] | None = None,
+) -> dict:
+    """Estimate indexing cost using live pricing when available."""
     if file_count == 0:
         return {"estimated_usd": 0.0, "input_tokens": 0, "output_tokens": 0}
 
-    input_price, output_price = MODEL_PRICING.get(model, (3.00, 15.00))
+    input_price, output_price = pricing or MODEL_PRICING.get(model, (3.00, 15.00))
 
-    # File summarization batches
-    batches = (file_count + 4) // 5  # ceil div
-    # Estimate: 800 tokens per file input, 400 tokens per file output
-    input_tokens = file_count * 800 + batches * 500  # +prompt overhead per batch
+    batches = (file_count + 4) // 5
+    input_tokens = file_count * 800 + batches * 500
     output_tokens = file_count * 400
-
-    # Directory summarization pass
     dir_batches = max(1, file_count // 10)
     input_tokens += dir_batches * 1500
     output_tokens += dir_batches * 300
-
     cost = (input_tokens / 1_000_000) * input_price + (output_tokens / 1_000_000) * output_price
-
     return {
         "estimated_usd": round(cost, 2),
         "input_tokens": input_tokens,
