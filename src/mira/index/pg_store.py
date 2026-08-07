@@ -1154,6 +1154,14 @@ class PgIndexStore(_StoreSharedMixin):
                 if c:
                     cat_counts[c] = cat_counts.get(c, 0) + 1
 
+        model_rows = self._fetchall(
+            "SELECT CASE WHEN model IS NULL OR TRIM(model) = '' THEN 'unknown' "
+            "ELSE model END AS m, COALESCE(SUM(cost_usd),0) "
+            f"FROM review_events WHERE owner=%s AND repo=%s{since_clause} GROUP BY m",
+            tuple(params),
+        )
+        cost_by_model = {str(m): float(c) for m, c in model_rows}
+
         return {
             "total_reviews": row[0],
             "total_comments": row[1],
@@ -1170,6 +1178,7 @@ class PgIndexStore(_StoreSharedMixin):
             "total_cache_write_tokens": int(row[12]),
             "total_cost_usd": float(row[13]),
             "categories": cat_counts,
+            "cost_by_model": cost_by_model,
         }
 
     # ── Review context ──

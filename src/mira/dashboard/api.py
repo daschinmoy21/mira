@@ -280,6 +280,8 @@ class ReviewStatsModel(BaseModel):
     total_cached_tokens: int = 0
     total_cache_write_tokens: int = 0
     total_cost_usd: float = 0.0
+    # model_id → spend USD (from review_events.model); empty ids collapsed to "unknown"
+    cost_by_model: dict[str, float] = {}
 
 
 class OrgStatsModel(BaseModel):
@@ -1289,6 +1291,8 @@ class TimeSeriesPoint(BaseModel):
     cached_tokens: int = 0
     cost_usd: float = 0.0
     categories: dict[str, int] = {}
+    # model_id → spend USD for this bucket
+    cost_by_model: dict[str, float] = {}
 
 
 # Importing the router modules runs their @router decorators, populating

@@ -243,6 +243,8 @@ export interface ReviewStatsModel {
   total_cached_tokens?: number
   total_cache_write_tokens?: number
   total_cost_usd?: number
+  /** model_id → spend USD */
+  cost_by_model?: Record<string, number>
 }
 
 export interface OrgStatsModel {

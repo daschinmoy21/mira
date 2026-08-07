@@ -210,6 +210,7 @@ def get_org_stats(period: str = "") -> OrgStatsModel:
         "total_cached_tokens": 0,
         "total_cache_write_tokens": 0,
         "total_cost_usd": 0.0,
+        "cost_by_model": {},
     }
     duration_sum = 0
     review_count = 0
@@ -234,6 +235,10 @@ def get_org_stats(period: str = "") -> OrgStatsModel:
             agg_stats["total_cost_usd"] += float(stats.get("total_cost_usd", 0) or 0)
             for cat, cnt in stats.get("categories", {}).items():
                 agg_stats["categories"][cat] = agg_stats["categories"].get(cat, 0) + cnt
+            for model, cost in stats.get("cost_by_model", {}).items():
+                agg_stats["cost_by_model"][model] = (
+                    float(agg_stats["cost_by_model"].get(model, 0)) + float(cost or 0)
+                )
             if stats["total_reviews"] > 0:
                 duration_sum += stats["avg_duration_ms"] * stats["total_reviews"]
                 review_count += stats["total_reviews"]
@@ -243,6 +248,12 @@ def get_org_stats(period: str = "") -> OrgStatsModel:
                 "Failed to read stats for %s/%s", repo_record.owner, repo_record.repo, exc_info=True
             )
     agg_stats["total_cost_usd"] = round(float(agg_stats["total_cost_usd"]), 6)
+    agg_stats["cost_by_model"] = {
+        k: round(float(v), 6)
+        for k, v in sorted(
+            agg_stats["cost_by_model"].items(), key=lambda kv: (-kv[1], kv[0])
+        )
+    }
 
     agg_stats["avg_duration_ms"] = int(duration_sum / review_count) if review_count > 0 else 0
     agg_stats["avg_comments_per_pr"] = (
@@ -291,6 +302,7 @@ def get_timeseries(period: str = "day") -> list[TimeSeriesPoint]:
                         "cached_tokens": e.cached_tokens,
                         "cost_usd": e.cost_usd,
                         "categories": e.categories,
+                        "model": (e.model or "").strip() or "unknown",
                     }
                 )
             store.close()
@@ -317,6 +329,7 @@ def get_timeseries(period: str = "day") -> list[TimeSeriesPoint]:
             "cached_tokens": 0,
             "cost_usd": 0.0,
             "categories": {},
+            "cost_by_model": {},
         }
     )
 
@@ -340,13 +353,20 @@ def get_timeseries(period: str = "day") -> list[TimeSeriesPoint]:
         b["prompt_tokens"] += ev["prompt_tokens"]
         b["completion_tokens"] += ev["completion_tokens"]
         b["cached_tokens"] += ev["cached_tokens"]
-        b["cost_usd"] += float(ev["cost_usd"] or 0)
+        cost = float(ev["cost_usd"] or 0)
+        b["cost_usd"] += cost
+        model = ev.get("model") or "unknown"
+        b["cost_by_model"][model] = float(b["cost_by_model"].get(model, 0)) + cost
         for c in (ev["categories"] or "").split(","):
             c = c.strip()
             if c:
                 b["categories"][c] = b["categories"].get(c, 0) + 1
 
-    return [
-        TimeSeriesPoint(date=k, **{**v, "cost_usd": round(float(v["cost_usd"]), 6)})
-        for k, v in sorted(buckets.items())
-    ]
+    result: list[TimeSeriesPoint] = []
+    for k, v in sorted(buckets.items()):
+        v["cost_usd"] = round(float(v["cost_usd"]), 6)
+        v["cost_by_model"] = {
+            mk: round(float(mv), 6) for mk, mv in sorted(v["cost_by_model"].items())
+        }
+        result.append(TimeSeriesPoint(date=k, **v))
+    return result

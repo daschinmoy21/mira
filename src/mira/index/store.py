@@ -1030,6 +1030,15 @@ class IndexStore(_StoreSharedMixin):
                 if c:
                     cat_counts[c] = cat_counts.get(c, 0) + 1
 
+        # Spend by model (empty model → "unknown")
+        model_rows = self._conn.execute(
+            "SELECT CASE WHEN model IS NULL OR TRIM(model) = '' THEN 'unknown' "
+            "ELSE model END AS m, COALESCE(SUM(cost_usd),0) "
+            f"FROM review_events{where} GROUP BY m",
+            params,
+        ).fetchall()
+        cost_by_model = {str(m): float(c) for m, c in model_rows}
+
         return {
             "total_reviews": row[0],
             "total_comments": row[1],
@@ -1046,6 +1055,7 @@ class IndexStore(_StoreSharedMixin):
             "total_cache_write_tokens": int(row[12]),
             "total_cost_usd": float(row[13]),
             "categories": cat_counts,
+            "cost_by_model": cost_by_model,
         }
 
     # Fingerprints untouched this long belong to closed/abandoned PRs — prune

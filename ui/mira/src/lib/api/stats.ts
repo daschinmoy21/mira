@@ -24,6 +24,7 @@ export const statsApi = {
         cached_tokens?: number
         cost_usd?: number
         categories: Record<string, number>
+        cost_by_model?: Record<string, number>
       }[]
     >(`/api/stats/timeseries?period=${period}`),
 }
