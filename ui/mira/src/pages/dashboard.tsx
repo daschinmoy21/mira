@@ -244,6 +244,16 @@ export function DashboardPage() {
                     ? ` · ${fmt(rs?.total_cache_write_tokens ?? 0)} cache write`
                     : ""}
                 </div>
+                {rs?.cost_by_model && Object.keys(rs.cost_by_model).length > 0 && (
+                  <div
+                    className="line-clamp-2 text-muted-foreground"
+                    title={Object.entries(rs.cost_by_model)
+                      .map(([m, c]) => `${m}: ${formatUsd(c)}`)
+                      .join("\n")}
+                  >
+                    {formatCostByModel(rs.cost_by_model)}
+                  </div>
+                )}
               </>
             )}
           </CardFooter>
@@ -355,18 +365,21 @@ export function DashboardPage() {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="min-w-0">
           <CardHeader>
             <CardTitle>LLM Cost</CardTitle>
             <CardDescription>
-              Spend over time (OpenRouter billed cost when available)
+              Spend over time (billed cost when the provider reports it)
             </CardDescription>
           </CardHeader>
           <CardContent>
             {timeseriesLoading ? (
               <ChartSkeleton />
             ) : timeseries && timeseries.length > 0 ? (
-              <CostChart key={period} data={timeseries} useBars={period !== "day"} />
+              <div className="space-y-3">
+                <CostChart key={period} data={timeseries} useBars={period !== "day"} />
+                <CostModelBreakdown data={timeseries} />
+              </div>
             ) : (
               <Empty />
             )}
@@ -468,6 +481,7 @@ type TSPoint = {
   cached_tokens?: number
   cost_usd?: number
   categories: Record<string, number>
+  cost_by_model?: Record<string, number>
 }
 
 function formatUsd(n: number): string {
@@ -476,6 +490,25 @@ function formatUsd(n: number): string {
   if (n < 1) return `$${n.toFixed(3)}`
   if (n < 100) return `$${n.toFixed(2)}`
   return `$${n.toFixed(0)}`
+}
+
+/** Shorten model ids for compact UI labels (keep last path segment). */
+function shortModelName(model: string): string {
+  const trimmed = model.trim()
+  if (!trimmed) return "unknown"
+  const parts = trimmed.split("/")
+  return parts[parts.length - 1] || trimmed
+}
+
+function formatCostByModel(byModel: Record<string, number> | undefined): string {
+  if (!byModel) return ""
+  const entries = Object.entries(byModel).sort(
+    (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+  )
+  if (entries.length === 0) return ""
+  return entries
+    .map(([m, c]) => `${shortModelName(m)} ${formatUsd(c)}`)
+    .join(" · ")
 }
 
 function ReviewsChart({ data, useBars }: { data: TSPoint[]; useBars: boolean }) {
@@ -589,7 +622,7 @@ function CostChart({ data, useBars }: { data: TSPoint[]; useBars: boolean }) {
   )
   if (useBars) {
     return (
-      <ChartContainer config={costConfig} className="h-[250px] w-full">
+      <ChartContainer config={costConfig} className="aspect-auto h-[250px] w-full min-w-0">
         <BarChart data={data}>
           <CartesianGrid vertical={false} />
           {xAxis}
@@ -600,7 +633,7 @@ function CostChart({ data, useBars }: { data: TSPoint[]; useBars: boolean }) {
     )
   }
   return (
-    <ChartContainer config={costConfig} className="h-[250px] w-full">
+    <ChartContainer config={costConfig} className="aspect-auto h-[250px] w-full min-w-0">
       <AreaChart data={data}>
         <CartesianGrid vertical={false} />
         {xAxis}
@@ -608,6 +641,37 @@ function CostChart({ data, useBars }: { data: TSPoint[]; useBars: boolean }) {
         <Area type="monotone" dataKey="cost_usd" stroke="var(--color-cost_usd)" fill="var(--color-cost_usd)" fillOpacity={0.15} strokeWidth={2} />
       </AreaChart>
     </ChartContainer>
+  )
+}
+
+/** Period-scoped model spend, summed from timeseries cost_by_model. */
+function CostModelBreakdown({ data }: { data: TSPoint[] }) {
+  const totals: Record<string, number> = {}
+  for (const pt of data) {
+    for (const [model, cost] of Object.entries(pt.cost_by_model ?? {})) {
+      totals[model] = (totals[model] ?? 0) + (cost || 0)
+    }
+  }
+  const entries = Object.entries(totals).sort(
+    (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+  )
+  if (entries.length === 0) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Model breakdown unavailable for older reviews (recorded before model tracking).
+      </p>
+    )
+  }
+  return (
+    <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+      <span className="font-medium text-foreground">Models</span>
+      {entries.map(([model, cost]) => (
+        <span key={model} className="tabular-nums" title={model}>
+          {shortModelName(model)}{" "}
+          <span className="text-foreground/80">{formatUsd(cost)}</span>
+        </span>
+      ))}
+    </div>
   )
 }
 

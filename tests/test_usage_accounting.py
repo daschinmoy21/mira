@@ -190,4 +190,5 @@ class TestReviewEventPersistence:
         assert stats["total_cached_tokens"] == 400
         assert stats["total_cache_write_tokens"] == 50
         assert stats["total_cost_usd"] == pytest.approx(0.042)
+        assert stats["cost_by_model"]["anthropic/claude-sonnet-4-6"] == pytest.approx(0.042)
         store.close()

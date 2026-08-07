@@ -470,15 +470,16 @@ export function ActivityPage() {
     // table body scrolls rather than the whole page. h-full won't resolve here
     // because the layout's <main> height comes from flex-grow under a
     // min-h-svh wrapper (no definite height for a percentage child).
-    <div className="flex h-[calc(100svh-3rem)] flex-col gap-4 overflow-hidden p-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
+    // min-w-0 + max-w-full keep wide tables from forcing page-level x-scroll.
+    <div className="flex h-[calc(100svh-3rem)] min-w-0 max-w-full flex-col gap-4 overflow-hidden p-6">
+      <div className="flex min-w-0 shrink-0 items-start justify-between gap-4">
+        <div className="min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight">Activity</h1>
           <p className="text-sm text-muted-foreground">
             Every PR Mira has reviewed, across all repositories.
           </p>
         </div>
-        <div className="flex gap-1">
+        <div className="flex shrink-0 gap-1">
           {(["day", "week", "month"] as const).map((p) => (
             <button
               key={p}
@@ -496,12 +497,12 @@ export function ActivityPage() {
       </div>
 
       {/* Top graph: reviews + issues found over time */}
-      <Card className="shrink-0">
+      <Card className="min-w-0 shrink-0">
         <CardContent className="pt-6">
           {chartLoading ? (
             <Skeleton className="h-[160px] w-full" />
           ) : timeseries && timeseries.length > 0 ? (
-            <ChartContainer config={chartConfig} className="h-[160px] w-full">
+            <ChartContainer config={chartConfig} className="aspect-auto h-[160px] w-full min-w-0">
               <AreaChart data={timeseries} margin={{ left: 4, right: 4, top: 4 }}>
                 <defs>
                   <linearGradient id="fillReviews" x1="0" y1="0" x2="0" y2="1">
@@ -548,8 +549,8 @@ export function ActivityPage() {
       </Card>
 
       {/* Controls: search, recency filter, repo filter, refresh, live */}
-      <div className="flex shrink-0 flex-col gap-2 lg:flex-row lg:items-center">
-        <div className="relative flex-1">
+      <div className="flex min-w-0 shrink-0 flex-col gap-2 lg:flex-row lg:items-center">
+        <div className="relative min-w-0 flex-1">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             aria-label="Search activity"
@@ -560,7 +561,7 @@ export function ActivityPage() {
           />
         </div>
         <Select value={windowSel} onValueChange={setWindowSel}>
-          <SelectTrigger className={cn("lg:w-44", windowSel !== "any" && ACTIVE_FILTER)}>
+          <SelectTrigger className={cn("w-full lg:w-44", windowSel !== "any" && ACTIVE_FILTER)}>
             <SelectValue placeholder="Any time" />
           </SelectTrigger>
           <SelectContent>
@@ -572,7 +573,7 @@ export function ActivityPage() {
           </SelectContent>
         </Select>
         <Select value={repo} onValueChange={setRepo}>
-          <SelectTrigger className={cn("lg:w-56", repo !== ALL_REPOS && ACTIVE_FILTER)}>
+          <SelectTrigger className={cn("w-full lg:w-56", repo !== ALL_REPOS && ACTIVE_FILTER)}>
             <SelectValue placeholder="All repos" />
           </SelectTrigger>
           <SelectContent>
@@ -584,47 +585,49 @@ export function ActivityPage() {
             ))}
           </SelectContent>
         </Select>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={refresh}
-          disabled={loading}
-          title="Refresh"
-          aria-label="Refresh activity"
-        >
-          <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
-          Refresh
-        </Button>
-        <Button
-          variant={live ? "default" : "outline"}
-          size="sm"
-          onClick={() => setLive((v) => !v)}
-          title={live ? "Live — auto-refreshing" : "Enable live auto-refresh"}
-          aria-label={live ? "Disable live auto-refresh" : "Enable live auto-refresh"}
-          aria-pressed={live}
-        >
-          <span
-            className={cn(
-              "h-2 w-2 rounded-full",
-              live ? "animate-pulse bg-green-500" : "bg-muted-foreground",
-            )}
-          />
-          {live ? (
-            <span>
-              Live ·{" "}
-              <span className="inline-block w-[2ch] text-right tabular-nums">
-                {countdown}
+        <div className="flex shrink-0 gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={refresh}
+            disabled={loading}
+            title="Refresh"
+            aria-label="Refresh activity"
+          >
+            <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
+            Refresh
+          </Button>
+          <Button
+            variant={live ? "default" : "outline"}
+            size="sm"
+            onClick={() => setLive((v) => !v)}
+            title={live ? "Live — auto-refreshing" : "Enable live auto-refresh"}
+            aria-label={live ? "Disable live auto-refresh" : "Enable live auto-refresh"}
+            aria-pressed={live}
+          >
+            <span
+              className={cn(
+                "h-2 w-2 rounded-full",
+                live ? "animate-pulse bg-green-500" : "bg-muted-foreground",
+              )}
+            />
+            {live ? (
+              <span>
+                Live ·{" "}
+                <span className="inline-block w-[2ch] text-right tabular-nums">
+                  {countdown}
+                </span>
+                s
               </span>
-              s
-            </span>
-          ) : (
-            "Live"
-          )}
-        </Button>
+            ) : (
+              "Live"
+            )}
+          </Button>
+        </div>
       </div>
 
-      {/* Table — one row per PR. Only this card scrolls; pagination pinned. */}
-      <Card className="flex min-h-0 flex-1 flex-col overflow-hidden py-0">
+      {/* Table — one row per PR. Vertical scroll in card; horizontal only inside table. */}
+      <Card className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden py-0">
         {loading ? (
           <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
             Loading…
@@ -644,8 +647,8 @@ export function ActivityPage() {
           </div>
         ) : (
           <>
-            <div className="themed-scrollbar min-h-0 flex-1 overflow-auto">
-              <Table containerClassName="overflow-x-visible overflow-y-visible">
+            <div className="themed-scrollbar min-h-0 min-w-0 flex-1 overflow-auto">
+              <Table>
                 <TableHeader className="sticky top-0 z-10 bg-background shadow-[0_1px_0_0_var(--border)]">
                   <TableRow>
                     <SortHead label="Repo" sortKey="repo" sort={sort} onSort={toggleSort} />
@@ -666,26 +669,28 @@ export function ActivityPage() {
                       className="cursor-pointer data-[active=true]:bg-muted/60"
                       onClick={() => openDetail(g)}
                     >
-                      <TableCell className="whitespace-nowrap font-mono text-xs text-muted-foreground">
-                        {g.owner}/{g.repo}
+                      <TableCell className="max-w-[10rem] font-mono text-xs text-muted-foreground">
+                        <span className="block truncate" title={`${g.owner}/${g.repo}`}>
+                          {g.owner}/{g.repo}
+                        </span>
                       </TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-2">
+                      <TableCell className="max-w-[8rem]">
+                        <div className="flex min-w-0 items-center gap-2">
                           <AuthorAvatar
                             username={g.author_username}
                             avatarUrl={g.author_avatar_url}
-                            className="h-5 w-5"
+                            className="h-5 w-5 shrink-0"
                           />
                           <span className="truncate text-xs text-muted-foreground">
                             {g.author_username || "—"}
                           </span>
                         </div>
                       </TableCell>
-                      <TableCell className="max-w-xs">
-                        <div className="flex items-center gap-2">
+                      <TableCell className="min-w-0 max-w-[18rem]">
+                        <div className="flex min-w-0 items-center gap-2">
                           <GitHubIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                          <span className="font-medium">#{g.pr_number}</span>
-                          <span className="truncate text-muted-foreground">
+                          <span className="shrink-0 font-medium">#{g.pr_number}</span>
+                          <span className="truncate text-muted-foreground" title={g.pr_title}>
                             {g.pr_title}
                           </span>
                         </div>
@@ -708,7 +713,7 @@ export function ActivityPage() {
                           }}
                         />
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="max-w-[12rem]">
                         <div className="flex flex-wrap gap-1">
                           {splitCategories(g.categories).map((c) => (
                             <Badge key={c} variant="secondary" className={PILL_RING}>

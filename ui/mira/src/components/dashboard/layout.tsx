@@ -313,12 +313,14 @@ export function DashboardLayout() {
         <SidebarRail />
       </Sidebar>
 
-      <SidebarInset>
+      {/* min-w-0 keeps the main pane from expanding past the viewport when
+          wide tables/charts are present (flex default min-width:auto). */}
+      <SidebarInset className="min-w-0 overflow-hidden">
         <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
           <SidebarTrigger className="-ml-1" />
           <AppBreadcrumb />
         </header>
-        <main className="flex-1 overflow-auto">
+        <main className="min-w-0 flex-1 overflow-auto">
           <Outlet />
         </main>
       </SidebarInset>
