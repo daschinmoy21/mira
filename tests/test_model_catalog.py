@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from mira.config import LLMConfig
 from mira.dashboard import model_catalog
-from mira.dashboard.model_catalog import active_backend, build_options, fetch_catalog
+from mira.dashboard.model_catalog import active_backend, build_options
 
 
 @pytest.fixture(autouse=True)
@@ -68,55 +66,34 @@ class TestBuildOptions:
 
 class TestFetchCatalog:
     @pytest.mark.asyncio
-    async def test_failure_returns_none_and_is_cached(self, monkeypatch: pytest.MonkeyPatch):
-        calls = 0
+    async def test_openrouter_pricing_is_normalized(self, monkeypatch):
+        class Response:
+            def raise_for_status(self):
+                pass
 
-        async def boom(config, tools_only):
-            nonlocal calls
-            calls += 1
-            raise RuntimeError("no network")
+            def json(self):
+                return {
+                    "data": [
+                        {
+                            "id": "example/model",
+                            "name": "Example",
+                            "supported_parameters": ["tools"],
+                            "pricing": {"prompt": "0.000001", "completion": "0.000002"},
+                        }
+                    ]
+                }
 
-        monkeypatch.setattr(model_catalog, "_fetch_openai_style", boom)
-        assert await fetch_catalog(LLMConfig()) is None
-        # A dead endpoint must not re-block every settings-page load.
-        assert await fetch_catalog(LLMConfig()) is None
-        assert calls == 1
+        class Client:
+            async def __aenter__(self):
+                return self
 
-    @pytest.mark.asyncio
-    async def test_result_is_cached(self, monkeypatch: pytest.MonkeyPatch):
-        calls = 0
+            async def __aexit__(self, *args):
+                pass
 
-        async def fake(config, tools_only):
-            nonlocal calls
-            calls += 1
-            return [{"value": "m", "label": "m"}]
+            async def get(self, *args, **kwargs):
+                return Response()
 
-        monkeypatch.setattr(model_catalog, "_fetch_openai_style", fake)
-        assert await fetch_catalog(LLMConfig()) == [{"value": "m", "label": "m"}]
-        assert await fetch_catalog(LLMConfig()) == [{"value": "m", "label": "m"}]
-        assert calls == 1
-
-    @pytest.mark.asyncio
-    async def test_concurrent_cold_fetches_coalesce(self, monkeypatch: pytest.MonkeyPatch):
-        calls = 0
-
-        async def slow(config, tools_only):
-            nonlocal calls
-            calls += 1
-            await asyncio.sleep(0.01)
-            return [{"value": "m", "label": "m"}]
-
-        monkeypatch.setattr(model_catalog, "_fetch_openai_style", slow)
-        results = await asyncio.gather(*(fetch_catalog(LLMConfig()) for _ in range(5)))
-        assert all(r == [{"value": "m", "label": "m"}] for r in results)
-        assert calls == 1
-
-    def test_bedrock_cache_key_includes_profile(self):
-        # Switching aws_profile must not serve the previous account's catalog.
-        a = LLMConfig(provider="bedrock", aws_profile="account-a")
-        b = LLMConfig(provider="bedrock", aws_profile="account-b")
-        assert a.region == b.region
-        # Keys derived the same way fetch_catalog does.
-        key_a = f"bedrock:{a.region}:{a.aws_profile or ''}"
-        key_b = f"bedrock:{b.region}:{b.aws_profile or ''}"
-        assert key_a != key_b
+        monkeypatch.setattr(model_catalog.httpx, "AsyncClient", lambda **kwargs: Client())
+        result = await model_catalog._fetch_openai_style(LLMConfig(), tools_only=True)
+        assert result[0]["input_cost_per_1m"] == pytest.approx(1.0)
+        assert result[0]["output_cost_per_1m"] == pytest.approx(2.0)

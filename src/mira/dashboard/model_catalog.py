@@ -44,8 +44,7 @@ def _norm(model_id: str) -> str:
 
 
 async def _fetch_openai_style(config: LLMConfig, tools_only: bool) -> list[dict]:
-    """GET {base_url}/models. With tools_only (OpenRouter), keep only
-    tool-calling models — Mira's review pass needs tool calling."""
+    """Fetch models, retaining provider pricing when the endpoint supplies it."""
     headers = {}
     try:
         key = _get_api_key(config)
@@ -61,7 +60,17 @@ async def _fetch_openai_style(config: LLMConfig, tools_only: bool) -> list[dict]
     for m in resp.json().get("data", []):
         if tools_only and "tools" not in (m.get("supported_parameters") or []):
             continue
-        out.append({"value": m["id"], "label": m.get("name") or m["id"]})
+        item = {"value": m["id"], "label": m.get("name") or m["id"]}
+        # OpenRouter reports USD per token as strings. Keep the raw values
+        # private to the backend; the dashboard exposes only calculated costs.
+        pricing = m.get("pricing")
+        if isinstance(pricing, dict):
+            try:
+                item["input_cost_per_1m"] = float(pricing["prompt"]) * 1_000_000
+                item["output_cost_per_1m"] = float(pricing["completion"]) * 1_000_000
+            except (KeyError, TypeError, ValueError):
+                pass
+        out.append(item)
     return out
 
 
