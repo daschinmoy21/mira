@@ -1156,7 +1156,7 @@ class PgIndexStore(_StoreSharedMixin):
 
         model_rows = self._fetchall(
             "SELECT CASE WHEN model IS NULL OR TRIM(model) = '' THEN 'unknown' "
-            "ELSE model END AS m, COALESCE(SUM(cost_usd),0) "
+            "ELSE TRIM(model) END AS m, COALESCE(SUM(cost_usd),0) "
             f"FROM review_events WHERE owner=%s AND repo=%s{since_clause} GROUP BY m",
             tuple(params),
         )

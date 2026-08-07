@@ -1033,7 +1033,7 @@ class IndexStore(_StoreSharedMixin):
         # Spend by model (empty model → "unknown")
         model_rows = self._conn.execute(
             "SELECT CASE WHEN model IS NULL OR TRIM(model) = '' THEN 'unknown' "
-            "ELSE model END AS m, COALESCE(SUM(cost_usd),0) "
+            "ELSE TRIM(model) END AS m, COALESCE(SUM(cost_usd),0) "
             f"FROM review_events{where} GROUP BY m",
             params,
         ).fetchall()
