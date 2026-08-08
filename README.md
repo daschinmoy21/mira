@@ -2,40 +2,57 @@
   <img src=".github/assets/logo.png" alt="Mira logo" width="120" />
 </p>
 
-<h1 align="center">Mira</h1>
+<h1 align="center">Mira <small>(fork)</small></h1>
 
 <p align="center">
-  <strong>Self-hosted AI code review. Your code, your dashboard, your LLM key.</strong>
+  <strong>Self-hosted AI code review — with GitHub PAT auth, Command Code / OpenCode providers, and live cost tracking.</strong>
 </p>
 
 <p align="center">
-  <a href="https://docs.miracode.ai"><img src="https://img.shields.io/badge/Docs-docs.miracode.ai-orange?style=flat&logo=readthedocs&logoColor=white" alt="Documentation" /></a>
-  <a href="https://discord.gg/uEU6qvYhgm"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat&logo=discord&logoColor=white" alt="Join our Discord" /></a>
+  <a href="https://github.com/daschinmoy21/mira"><img src="https://img.shields.io/badge/GitHub-daschinmoy21%2Fmira-181717?style=flat&logo=github" alt="This fork" /></a>
+  <a href="https://github.com/miracodeai/mira"><img src="https://img.shields.io/badge/Upstream-miracodeai%2Fmira-orange?style=flat&logo=github" alt="Upstream Mira" /></a>
+  <a href="https://docs.miracode.ai"><img src="https://img.shields.io/badge/Docs-docs.miracode.ai-blue?style=flat&logo=readthedocs&logoColor=white" alt="Upstream documentation" /></a>
 </p>
 
 <p align="center">
-  <a href="https://docs.miracode.ai">Docs</a> ·
-  <a href="https://discord.gg/uEU6qvYhgm">Community</a> ·
-  <a href="https://docs.miracode.ai/deployment"><strong>Self-Host Guide »</strong></a> ·
+  <a href="#whats-different-in-this-fork">Fork changes</a> ·
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="https://docs.miracode.ai">Upstream Docs</a> ·
   <a href="#benchmark">Benchmark</a>
 </p>
 
+> **Fork of [miracodeai/mira](https://github.com/miracodeai/mira).** Same self-hosted review engine, indexing, and dashboard — plus personal GitHub PAT auth (no App), first-class [Command Code](https://commandcode.ai) / [OpenCode](https://opencode.ai) LLM profiles, and dashboard spend tracking with cost-by-model breakdown.
+
 Self-host every feature: full review engine, codebase indexing, vulnerability scanning, custom rules, org-wide package search, dashboard, learning loop. No paid tier, no license key, no SaaS upsell.
 
-Mira reviews your pull requests using your choice of LLM (via [OpenRouter](https://openrouter.ai), which fronts Anthropic, OpenAI, Google, DeepSeek, and more) and posts concise, actionable feedback. The noise filter, confidence clamping, and learning loop ensure you only see comments that matter. See [`FEATURES.md`](FEATURES.md) for the full surface.
+Mira reviews your pull requests using your choice of LLM (OpenRouter, Command Code, OpenCode, Bedrock, or any OpenAI-compatible endpoint) and posts concise, actionable feedback. The noise filter, confidence clamping, and learning loop ensure you only see comments that matter. See [`FEATURES.md`](FEATURES.md) for the full surface (upstream feature set still applies).
+
+## What's different in this fork
+
+| Area | Change |
+|------|--------|
+| **GitHub auth** | **PAT mode** — review as a personal collaborator with `MIRA_GITHUB_TOKEN` + repo/org webhooks. No GitHub App install required. Upstream App mode still works. |
+| **LLM providers** | Built-in profiles for **Command Code** (`CMD_API_KEY`) and **OpenCode Go / Zen** (`OPENCODE_API_KEY`), in addition to OpenRouter and other OpenAI-compatible endpoints. |
+| **OpenCode reliability** | Retries opaque HTTP 400s from forced `tool_choice` (e.g. OpenCode Go) by falling back to `tool_choice=auto`. |
+| **Cost telemetry** | Persists real LLM tokens + billed cost per review; dashboard Cost / Spend cards show **cost by model**. Indexing estimates use **live model pricing** when available. |
+| **Dashboard UX** | Activity page no longer forces page-level horizontal scroll; cost breakdowns surface model IDs cleanly. |
+| **Deploy** | Build from this repo's `Dockerfile` (upstream `ghcr.io/miracodeai/mira` images do not include the PAT / provider work). |
+
+Upstream docs, Discord, and benchmarks still describe the core product. Prefer this README for PAT setup, Command Code / OpenCode config, and local image builds.
 
 ## Why Teams Choose Mira
 
-- **Model agnostic** — Run Claude, GPT, Gemini, DeepSeek, Llama, or any OpenAI-compatible endpoint: OpenRouter, vLLM, Ollama, Together, Groq, Fireworks, or AWS Bedrock direct. Per-provider quirks are config, not code, so adding a provider is a one-line entry.
-- **Zero markup on LLM costs** — Bring your own key. You pay the model provider directly; Mira never proxies your spend or adds a multiplier. The dashboard shows real per-repo, per-model cost — not estimates.
-- **Learns from your context** — Mira synthesizes rules from your merged PRs: rejected comments and human review patterns become team rules that shape future reviews.
-- **You set the rules** — Define custom and org-wide review rules in plain language, per-repo via `.mira.yaml` or from the dashboard.
-- **Privacy first** — Self-hosted by default. Diffs, indexes, review history, and CVE data live in your SQLite or Postgres, on infra you own. No phone-home, no required telemetry, no "is this used for training?"
-- **Low-noise reviews** — Confidence thresholds, dedup, a self-critique pass, and per-PR caps mean every comment is one worth reading — and Mira is the fastest tool on the public [Code Review Bench](#benchmark).
-- **Catches PRs stepping on each other** — While reviewing, Mira checks the repo's other open PRs and flags merge-conflict risk and duplicate effort right in the walkthrough.
-- **Indexed, cross-file context** — A full-repo code index gives the model real project context, not just the diff — plus org-wide package search and hourly OSV.dev CVE scanning across every repo.
-- **GitHub, GitLab, and Forgejo** — Auto-reviews every PR and merge request and answers `@miracodeai` questions inline, with full feature parity across GitHub, GitLab, and Forgejo (incl. Codeberg). A Bitbucket adapter is next; the engine, indexer, and dashboard are provider-agnostic, so a new host is a data entry plus one provider class.
-- **Self-host on day one** — Docker image with Railway / Fly.io / Render configs, SQLite or Postgres. Every feature included.
+- **Model agnostic** — Claude, GPT, Gemini, DeepSeek, Llama, or any OpenAI-compatible endpoint: OpenRouter, Command Code, OpenCode Go/Zen, vLLM, Ollama, Together, Groq, Fireworks, or AWS Bedrock. Per-provider quirks are config, not code.
+- **GitHub without an App** *(this fork)* — use a fine-grained or classic PAT as a collaborator; post reviews and answer `@mention` questions the same way App mode does.
+- **Zero markup on LLM costs** — bring your own key. Dashboard shows real per-repo and **per-model** spend, not estimates.
+- **Learns from your context** — synthesizes rules from merged PRs: rejected comments and human review patterns become team rules.
+- **You set the rules** — custom and org-wide rules in plain language, per-repo via `.mira.yaml` or the dashboard.
+- **Privacy first** — self-hosted by default. Diffs, indexes, review history, and CVE data live in your SQLite or Postgres. No phone-home, no required telemetry.
+- **Low-noise reviews** — confidence thresholds, dedup, self-critique, and per-PR caps; fastest tool on the public [Code Review Bench](#benchmark).
+- **Cross-PR overlap** — flags merge-conflict risk and duplicate effort against other open PRs.
+- **Indexed, cross-file context** — full-repo index, org-wide package search, hourly OSV.dev CVE scanning.
+- **GitHub, GitLab, and Forgejo** — auto-reviews PRs/MRs and answers bot mentions inline. Engine and dashboard are provider-agnostic.
+- **Self-host on day one** — Docker + Railway / Fly.io / Render configs, SQLite or Postgres.
 
 ## Dashboard
 
@@ -43,19 +60,15 @@ Mira reviews your pull requests using your choice of LLM (via [OpenRouter](https
 
 ## Your data, your dashboard
 
-Most AI reviewers are SaaS: your diffs (and often the full surrounding code) leave for a third-party server, and the only "view" you get is the comments that come back on a PR. Mira flips both halves of that:
+Most AI reviewers are SaaS: your diffs leave for a third-party server, and the only "view" you get is the comments that come back on a PR. Mira flips both halves:
 
-- **Your code never leaves your infra.** Diffs, embeddings, indexes, review history, vulnerability data, all stored in your SQLite or Postgres, on infrastructure you own. No phone-home, no required telemetry, no "is this used for training?" question.
-- **The dashboard you see above is yours.** It's not a marketing screenshot of someone else's view of your code. CodeRabbit, Greptile, and similar SaaS reviewers don't expose anything like it. Mira's dashboard surfaces signals you don't get anywhere else:
-  - **Org-wide package inventory**: answer "which repos use `lodash@4.17.20`?" in one query. Stack it next to your CVE feed for instant blast-radius checks.
-  - **CVE alerts on every dependency**: hourly OSV.dev poll, severity + advisory link + fix version surfaced inline next to the package.
-  - **Dependency + blast-radius graphs**: see exactly which files and repos depend on a symbol before you change it.
-  - **Per-repo review event stream**: every webhook, every chunk, every cost figure, in one place for live troubleshooting.
-  - **Cost & token telemetry**: actual spend per repo and per model, not estimates, because you control the LLM key.
-  - **Review-health page**: stale/waiting PRs, a reviewer-responsiveness leaderboard, throughput trends, and rubber-stamp detection (approvals with no substantive review) — plus per-contributor analytics with a year-long heatmap and Mira's review-quality signal.
-  - **Coming soon, change-frequency heatmaps**: surface the files that bug fixes keep landing on so you can target review attention.
-
-If your engineering team needs answers like *"which of our repos are exposed to this CVE?"* or *"what's the blast radius of changing this function?"*, those questions stop being multi-day investigations and start being one-click dashboard pages.
+- **Your code never leaves your infra.** Diffs, embeddings, indexes, review history, vulnerability data — all in your SQLite or Postgres.
+- **The dashboard is yours**, with signals SaaS reviewers typically don't expose:
+  - **Org-wide package inventory** and **CVE alerts** (hourly OSV.dev).
+  - **Dependency + blast-radius graphs**.
+  - **Per-repo review event stream** for live troubleshooting.
+  - **Cost & token telemetry** — actual spend per repo and **per model** (this fork).
+  - **Review-health page** — stale PRs, reviewer leaderboard, throughput, rubber-stamp detection, contributor analytics.
 
 ## Benchmark
 
@@ -76,15 +89,13 @@ Measured on the same 50-PR offline benchmark, judged by Claude Sonnet 4.6.
 | Recall | **46%** | 65% | 40% | 50% | 43% |
 | Median time / PR | **~77s** | ~9m | ~5m | ~5m | ~10m |
 
-> Methodology: scores measured against the [Martian Code Review Bench](https://codereview.withmartian.com/?mode=offline) offline dataset with Claude Sonnet 4.6 as the judge.
+> Methodology: scores measured against the [Martian Code Review Bench](https://codereview.withmartian.com/?mode=offline) offline dataset with Claude Sonnet 4.6 as the judge. Figures are from upstream Mira; this fork does not change the review engine's quality/latency profile.
 
 ## Quick Start
 
-Run Mira self-hosted to auto-review every PR and merge request and answer `@miracodeai` questions inline. GitHub (as a GitHub App), GitLab (via a group/project access token), and Forgejo/Codeberg (via an access token) are all fully supported; Bitbucket is next.
+Run this fork to auto-review every PR and merge request and answer bot `@mention` questions inline. GitHub supports **App mode** (upstream) or **PAT mode** (this fork). GitLab and Forgejo/Codeberg use access tokens as upstream documents.
 
-**1. Deploy** — one-click on Railway, or with Docker:
-
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/workspace/templates/05874bad-2d98-43f4-aa93-332f394e9ebd)
+**1. Deploy** — build from this repo (recommended for PAT + provider profiles):
 
 ```yaml
 # mira.yaml — deployment-wide defaults. Every key is optional.
@@ -114,7 +125,7 @@ llm:
 # --- GitHub App mode (upstream) ---
 # MIRA_GITHUB_APP_ID=123456
 # MIRA_GITHUB_PRIVATE_KEY="$(cat private-key.pem)"
-# --- GitHub PAT mode (personal collaborator; no App) ---
+# --- GitHub PAT mode (this fork; personal collaborator; no App) ---
 MIRA_GITHUB_TOKEN=ghp_...
 MIRA_WEBHOOK_SECRET=your-secret
 # LLM (pick the key that matches llm.api_key_env / base_url above)
@@ -124,24 +135,30 @@ OPENROUTER_API_KEY=sk-or-...
 ```
 
 ```bash
-# Official image (App mode as upstream):
-# docker run -p 8000:8000 --env-file .env \
-#   -v "$(pwd)/mira.yaml:/app/mira.yaml" \
-#   ghcr.io/miracodeai/mira:latest --config /app/mira.yaml
-
 # This fork (PAT + Command Code / OpenCode profiles) — build locally:
 docker build -t mira:local .
 docker run -p 8000:8000 --env-file .env \
   -v "$(pwd)/mira.yaml:/app/mira.yaml" \
   mira:local --config /app/mira.yaml
+
+# Upstream image (App mode only; lacks this fork's PAT/provider work):
+# docker run -p 8000:8000 --env-file .env \
+#   -v "$(pwd)/mira.yaml:/app/mira.yaml" \
+#   ghcr.io/miracodeai/mira:latest --config /app/mira.yaml
 ```
+
+One-click Railway / Fly / Render still work if you **build from this Dockerfile** rather than the upstream image. See comments in `railway.toml`, `fly.toml`, and `render.yaml`.
 
 **2. Connect GitHub**
 
-- **App mode:** install the GitHub App on your repos (upstream docs).
-- **PAT mode (this fork):** add the PAT user as a collaborator on each target repo; create a **repo or org webhook** → `https://<your-host>/github/webhook` with the same `MIRA_WEBHOOK_SECRET`, events: `pull_request`, `issue_comment`, `pull_request_review`, `pull_request_review_comment`, `push`.
+- **App mode:** install a GitHub App on your repos ([upstream quickstart](https://docs.miracode.ai/quickstart)).
+- **PAT mode (this fork):**
+  1. Create a fine-grained or classic PAT with repo + PR write access.
+  2. Add the PAT user as a collaborator on each target repo.
+  3. Create a **repo or org webhook** → `https://<your-host>/github/webhook` with the same `MIRA_WEBHOOK_SECRET`.
+  4. Events: `pull_request`, `issue_comment`, `pull_request_review`, `pull_request_review_comment`, `push`.
 
-→ Full walkthrough: [creating the GitHub App & quickstart](https://docs.miracode.ai/quickstart) · [GitLab setup](https://docs.miracode.ai/gitlab) · [deploy options](https://docs.miracode.ai/deployment) · [choosing models, custom endpoints & AWS Bedrock](https://docs.miracode.ai/configuration/models)
+→ [Upstream GitHub App quickstart](https://docs.miracode.ai/quickstart) · [GitLab](https://docs.miracode.ai/gitlab) · [deploy options](https://docs.miracode.ai/deployment) · [models & custom endpoints](https://docs.miracode.ai/configuration/models)
 
 ## Configuration
 
@@ -154,30 +171,29 @@ filter:
   max_comments: 10
 ```
 
-→ Full schema and every key: [Configuration docs](https://docs.miracode.ai/configuration).
+→ Full schema and every key: [Configuration docs](https://docs.miracode.ai/configuration). Env template for this fork: [`.env.example`](.env.example).
 
 ## Development
 
 ```bash
-git clone https://github.com/miracodeai/mira.git
+git clone https://github.com/daschinmoy21/mira.git
 cd mira
 pip install -e ".[dev,serve]"
+# or: uv sync --all-extras
 
 # Run tests
 pytest tests/ -v
 
-# Run the regression suite (hits real GitHub + LLM, ~$1, ~3 min).
-# Pinned PRs whose findings have flickered across iterations. Run before
-# merging changes that touch prompts, the noise filter, or the engine.
+# Regression suite (real GitHub + LLM, ~$1, ~3 min)
 OPENROUTER_API_KEY=... GITHUB_TOKEN=... pytest -m eval -v
 
-# Lint
+# Lint / types
 ruff check src/ tests/
-
-# Type check
 mypy src/mira/ --ignore-missing-imports
 ```
 
+Upstream contributions belong on [miracodeai/mira](https://github.com/miracodeai/mira). Fork-specific work (PAT mode, Command Code / OpenCode, cost-by-model UI) lives here.
+
 ## License
 
-Apache 2.0. See [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE). Same license as upstream.
