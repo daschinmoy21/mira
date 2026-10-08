@@ -44,9 +44,7 @@ class TestParseOpenAIUsage:
 
     def test_cost_zero_is_authoritative(self):
         # Free models report cost: 0 — must not fall through to estimate.
-        parsed = parse_openai_usage(
-            {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0}
-        )
+        parsed = parse_openai_usage({"prompt_tokens": 10, "completion_tokens": 5, "cost": 0})
         assert parsed["cost_usd"] == 0.0
 
 
@@ -75,9 +73,7 @@ class TestEstimateCost:
 
     def test_cache_reduces_billable_input(self):
         full = estimate_cost_usd("unknown/model", 1_000_000, 0, cached_tokens=0)
-        half_cached = estimate_cost_usd(
-            "unknown/model", 1_000_000, 0, cached_tokens=500_000
-        )
+        half_cached = estimate_cost_usd("unknown/model", 1_000_000, 0, cached_tokens=500_000)
         assert half_cached < full
 
 

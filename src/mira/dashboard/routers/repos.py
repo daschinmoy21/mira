@@ -66,10 +66,7 @@ async def sync_repos(request: Request) -> dict:
     _require_admin(request)
     app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
     private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
-    pat = (
-        os.environ.get("MIRA_GITHUB_TOKEN", "")
-        or os.environ.get("GITHUB_TOKEN", "")
-    )
+    pat = os.environ.get("MIRA_GITHUB_TOKEN", "") or os.environ.get("GITHUB_TOKEN", "")
     if not ((app_id and private_key) or pat):
         raise HTTPException(
             status_code=400,
@@ -436,10 +433,7 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
         if not token:
             raise HTTPException(status_code=400, detail="MIRA_FORGEJO_TOKEN is not configured.")
     else:
-        token = (
-            os.environ.get("MIRA_GITHUB_TOKEN", "")
-            or os.environ.get("GITHUB_TOKEN", "")
-        )
+        token = os.environ.get("MIRA_GITHUB_TOKEN", "") or os.environ.get("GITHUB_TOKEN", "")
         if not token:
             try:
                 from mira.platforms.github.auth import GitHubAppAuth

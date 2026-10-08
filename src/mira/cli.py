@@ -537,10 +537,7 @@ def serve(
     "--github-token",
     envvar="MIRA_GITHUB_TOKEN",
     default=None,
-    help=(
-        "GitHub PAT (PAT mode). Also accepts GITHUB_TOKEN. Used when App creds "
-        "are not set."
-    ),
+    help=("GitHub PAT (PAT mode). Also accepts GITHUB_TOKEN. Used when App creds are not set."),
 )
 @click.option(
     "--since",

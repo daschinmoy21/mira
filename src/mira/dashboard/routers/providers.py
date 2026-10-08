@@ -176,7 +176,8 @@ async def start_login(provider: str, request: Request) -> LoginState:
 
 
 @router.get("/api/settings/provider/{provider}/login/status", response_model=LoginState)
-def login_status(provider: str) -> LoginState:
+def login_status(provider: str, request: Request) -> LoginState:
+    _require_admin(request)
     _check_login_provider(provider)
     return LoginState(**provider_login.snapshot(provider))
 

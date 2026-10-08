@@ -454,10 +454,7 @@ async def get_setup_status() -> dict:
         try:
             app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
             private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
-            pat = (
-                os.environ.get("MIRA_GITHUB_TOKEN", "")
-                or os.environ.get("GITHUB_TOKEN", "")
-            )
+            pat = os.environ.get("MIRA_GITHUB_TOKEN", "") or os.environ.get("GITHUB_TOKEN", "")
             if app_id and private_key:
                 import asyncio as _asyncio
 
@@ -496,9 +493,7 @@ async def get_setup_status() -> dict:
                     if "/" in full_name:
                         owner, repo = full_name.split("/", 1)
                         _api._app_db.register_repo(owner, repo, 0)
-                        _api._app_db.set_repo_visibility(
-                            owner, repo, bool(r.get("private", False))
-                        )
+                        _api._app_db.set_repo_visibility(owner, repo, bool(r.get("private", False)))
                         repo_count += 1
                 if repos_list:
                     _asyncio.create_task(_count_files_for_repos(auth, 0, repos_list))

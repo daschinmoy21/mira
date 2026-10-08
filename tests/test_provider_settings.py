@@ -397,5 +397,5 @@ class TestProviderRoutes:
 
     def test_unknown_provider_path_is_404(self):
         with pytest.raises(HTTPException) as exc:
-            providers_router.login_status("openrouter")
+            providers_router.login_status("openrouter", ADMIN)
         assert exc.value.status_code == 404

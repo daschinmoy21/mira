@@ -482,9 +482,7 @@ async def dispatch_github_event(
 
     # A human submitted a review — capture responsiveness + the review event.
     if event == "pull_request_review" and action == "submitted":
-        if not await _is_self_login(
-            app_auth, bot_name, payload.get("sender", {}).get("login", "")
-        ):
+        if not await _is_self_login(app_auth, bot_name, payload.get("sender", {}).get("login", "")):
             background_tasks.add_task(handle_pull_request_review, payload, app_auth, bot_name)
         return "processing"
 
@@ -493,9 +491,7 @@ async def dispatch_github_event(
         and action in _PR_MERGE_ACTIONS
         and payload.get("pull_request", {}).get("merged")
     ):
-        if await _is_self_login(
-            app_auth, bot_name, payload.get("sender", {}).get("login", "")
-        ):
+        if await _is_self_login(app_auth, bot_name, payload.get("sender", {}).get("login", "")):
             return "ignored"
         background_tasks.add_task(handle_pr_merged, payload, app_auth, bot_name)
         return "processing"

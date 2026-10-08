@@ -76,9 +76,7 @@ class GitHubTokenAuth:
         }
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{self._api_url}/user", headers=headers, timeout=10.0
-                )
+                resp = await client.get(f"{self._api_url}/user", headers=headers, timeout=10.0)
                 if resp.status_code == 200:
                     login = resp.json().get("login")
                     self._username = login if isinstance(login, str) and login else None

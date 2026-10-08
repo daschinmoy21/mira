@@ -507,10 +507,7 @@ async def _run_initial_indexing(default_mode: str) -> None:
 
     # Resolve a GitHub token once (used for github repos). GitLab repos use
     # MIRA_GITLAB_TOKEN instead — each repo gets a fetcher for its platform.
-    github_token = (
-        os.environ.get("MIRA_GITHUB_TOKEN", "")
-        or os.environ.get("GITHUB_TOKEN", "")
-    )
+    github_token = os.environ.get("MIRA_GITHUB_TOKEN", "") or os.environ.get("GITHUB_TOKEN", "")
     if not github_token and any(r.platform == "github" for r in to_index):
         try:
             from mira.platforms.github.auth import GitHubAppAuth

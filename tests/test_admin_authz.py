@@ -19,6 +19,7 @@ PROTECTED = [
     ("/api/settings/models", "PUT", {"body": None}),
     ("/api/settings/provider", "PUT", {"body": None}),
     ("/api/settings/provider/{provider}/login", "POST", {"provider": "xai"}),
+    ("/api/settings/provider/{provider}/login/status", "GET", {"provider": "xai"}),
     ("/api/settings/provider/{provider}/logout", "POST", {"provider": "xai"}),
     ("/api/uninstalls/{installation_id}/keep", "POST", {"installation_id": 1}),
     ("/api/uninstalls/{installation_id}/delete", "POST", {"installation_id": 1}),

@@ -248,9 +248,9 @@ def get_org_stats(period: str = "") -> OrgStatsModel:
             for cat, cnt in stats.get("categories", {}).items():
                 agg_stats["categories"][cat] = agg_stats["categories"].get(cat, 0) + cnt
             for model, cost in stats.get("cost_by_model", {}).items():
-                agg_stats["cost_by_model"][model] = (
-                    float(agg_stats["cost_by_model"].get(model, 0)) + float(cost or 0)
-                )
+                agg_stats["cost_by_model"][model] = float(
+                    agg_stats["cost_by_model"].get(model, 0)
+                ) + float(cost or 0)
             if stats["total_reviews"] > 0:
                 duration_sum += stats["avg_duration_ms"] * stats["total_reviews"]
                 review_count += stats["total_reviews"]
@@ -262,9 +262,7 @@ def get_org_stats(period: str = "") -> OrgStatsModel:
     agg_stats["total_cost_usd"] = round(float(agg_stats["total_cost_usd"]), 6)
     agg_stats["cost_by_model"] = {
         k: round(float(v), 6)
-        for k, v in sorted(
-            agg_stats["cost_by_model"].items(), key=lambda kv: (-kv[1], kv[0])
-        )
+        for k, v in sorted(agg_stats["cost_by_model"].items(), key=lambda kv: (-kv[1], kv[0]))
     }
 
     agg_stats["avg_duration_ms"] = int(duration_sum / review_count) if review_count > 0 else 0
