@@ -64,14 +64,24 @@ async def estimate_cost() -> CostEstimate:
     """Estimate indexing cost using the configured backend's model pricing."""
     from mira.config import load_config
     from mira.dashboard.model_catalog import fetch_catalog
-    from mira.dashboard.models_config import estimate_indexing_cost, get_indexing_model
+    from mira.dashboard.models_config import (
+        apply_provider_override,
+        estimate_indexing_cost,
+        get_indexing_model,
+        model_for_provider,
+        resolve_provider_choice,
+    )
 
     config = load_config()
-    model = get_indexing_model(config.llm, _api._app_db.get_setting("indexing_model"))
+    choice = resolve_provider_choice(_api._app_db.get_setting("llm_provider"))
+    llm_config = apply_provider_override(config.llm, choice)
+    model = model_for_provider(
+        choice, get_indexing_model(llm_config, _api._app_db.get_setting("indexing_model"))
+    )
     total_files = sum(
         r.file_count_estimate for r in _api._app_db.list_repos() if r.status == "pending"
     )
-    catalog = await fetch_catalog(config.llm)
+    catalog = await fetch_catalog(llm_config)
     live = next((item for item in (catalog or []) if item.get("value") == model), None)
     pricing = None
     if live and "input_cost_per_1m" in live and "output_cost_per_1m" in live:

@@ -190,6 +190,15 @@ precedence over the login; keys for other services (e.g. `OPENROUTER_API_KEY`) a
 sent to xAI. Reasoning effort `low`/`medium`/`high` is supported (`max` maps to `high`).
 Dashboard cost figures for subscription usage are API-price estimates, not billed amounts.
 
+**From the dashboard:** admins can do the same without a terminal. In **Settings** (and the
+first-run setup) the **Provider** card lets you pick *xAI Grok* or *OpenAI Codex*, and **Log in**
+shows a one-time code plus a sign-in link, then picks up the approval automatically. The model
+pickers then list that provider's models (Grok from the built-in registry plus xAI's live list;
+Codex straight from the installed CLI via `codex debug models`) with context window, price and
+reasoning badges. Switching provider swaps the endpoint for every review/indexing call; models
+that the new provider can't serve fall back to its default (`xai/grok-4.5`, `codex-default`).
+Logging out of the active provider returns Mira to the deployment default.
+
 ### Codex CLI
 
 If you already use OpenAI Codex locally, Mira can run reviews through the
@@ -216,7 +225,9 @@ docker run -p 8000:8000 --env-file .env \
   ghcr.io/miracodeai/mira:latest --config /app/mira.yaml
 ```
 
-This provider does not require `OPENROUTER_API_KEY`. Mira copies only `auth.json`
+This provider does not require `OPENROUTER_API_KEY`. You can also sign in from the dashboard (Settings → Provider → OpenAI Codex), which runs
+`codex login --device-auth` on the Mira host and stores the result under `llm.codex_home`,
+`$CODEX_HOME`, `$MIRA_CODEX_HOME`, or `$MIRA_INDEX_DIR/codex` (first one set). Mira copies only `auth.json`
 from the read-only mount into a private, writable temporary Codex home for each
 invocation. It launches Codex in an empty temporary workspace with a minimal
 environment, disables inherited shell environment variables and user/project

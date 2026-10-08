@@ -365,6 +365,12 @@ class ModelOption(BaseModel):
     value: str
     label: str
     recommended: bool = False
+    # Optional picker metadata (registry entries and live catalogs fill what they know).
+    description: str | None = None
+    context_window: int | None = None
+    input_cost_per_1m: float | None = None
+    output_cost_per_1m: float | None = None
+    reasoning: bool | None = None
 
 
 class ModelsResponse(BaseModel):
@@ -1315,6 +1321,7 @@ class TimeSeriesPoint(BaseModel):
 # isort: off
 import mira.dashboard.routers.admin  # noqa: E402,F401
 import mira.dashboard.routers.core  # noqa: E402,F401
+import mira.dashboard.routers.providers  # noqa: E402,F401
 import mira.dashboard.routers.relationships  # noqa: E402,F401
 import mira.dashboard.routers.rules  # noqa: E402,F401
 import mira.dashboard.routers.vulnerabilities  # noqa: E402,F401

@@ -156,27 +156,32 @@ async def get_models() -> ModelsResponse:
     from mira.dashboard.models_config import (
         API_STYLES,
         THINKING_MODES,
+        apply_provider_override,
         get_indexing_model,
         get_review_model,
         get_review_thinking_mode,
         get_security_model,
+        model_for_provider,
         resolve_api_style,
+        resolve_provider_choice,
     )
 
     config = load_config()
+    choice = resolve_provider_choice(_api._app_db.get_setting("llm_provider"))
+    llm_config = apply_provider_override(config.llm, choice)
     db_indexing = _api._app_db.get_setting("indexing_model")
     db_review = _api._app_db.get_setting("review_model")
     db_security = _api._app_db.get_setting("security_model")
-    indexing = get_indexing_model(config.llm, db_indexing)
-    review = get_review_model(config.llm, db_review)
-    security = get_security_model(config.llm, db_security, db_review)
+    indexing = model_for_provider(choice, get_indexing_model(llm_config, db_indexing))
+    review = model_for_provider(choice, get_review_model(llm_config, db_review))
+    security = model_for_provider(choice, get_security_model(llm_config, db_security, db_review))
     thinking = get_review_thinking_mode(
-        config.llm, _api._app_db.get_setting("review_thinking_mode")
+        llm_config, _api._app_db.get_setting("review_thinking_mode")
     )
-    api_style = resolve_api_style(config.llm, _api._app_db.get_setting("api_style"))
+    api_style = resolve_api_style(llm_config, _api._app_db.get_setting("api_style"))
 
-    backend = active_backend(config.llm)
-    catalog = await fetch_catalog(config.llm)
+    backend = active_backend(llm_config)
+    catalog = await fetch_catalog(llm_config)
 
     return ModelsResponse(
         indexing_model=indexing,
@@ -186,9 +191,9 @@ async def get_models() -> ModelsResponse:
         indexing_source="dashboard" if db_indexing else "config",
         review_source="dashboard" if db_review else "config",
         security_source="dashboard" if db_security else "config",
-        config_indexing_model=get_indexing_model(config.llm),
-        config_review_model=get_review_model(config.llm),
-        config_security_model=get_security_model(config.llm),
+        config_indexing_model=model_for_provider(choice, get_indexing_model(llm_config)),
+        config_review_model=model_for_provider(choice, get_review_model(llm_config)),
+        config_security_model=model_for_provider(choice, get_security_model(llm_config)),
         indexing_options=[ModelOption(**m) for m in build_options(backend, catalog, "indexing")],
         review_options=[ModelOption(**m) for m in build_options(backend, catalog, "review")],
         security_options=[ModelOption(**m) for m in build_options(backend, catalog, "review")],

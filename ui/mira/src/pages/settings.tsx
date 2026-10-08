@@ -1,6 +1,7 @@
 import { Loader2 } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 
+import { ProviderPicker } from "@/components/dashboard/provider-picker"
 import { ModelCombobox, type ModelOption } from "@/components/model-combobox"
 import { Button } from "@/components/ui/button"
 import {
@@ -67,9 +68,10 @@ export function SettingsPage() {
   // bucket for non-field errors.
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
 
-  useEffect(() => {
-    if (!currentUser?.is_admin) return
-    api.getModels().then((m) => {
+  // Fetch the model catalog + current selections. Re-run after the provider
+  // changes or a login completes, since the available models differ.
+  const loadModels = useCallback(() => {
+    return api.getModels().then((m) => {
       setIndexingModel(m.indexing_source === "config" ? "" : m.indexing_model)
       setReviewModel(m.review_source === "config" ? "" : m.review_model)
       setSecurityModel(m.security_source === "config" ? "" : m.security_model)
@@ -85,6 +87,11 @@ export function SettingsPage() {
       setApiStyle(m.api_style ?? "chat")
       setApiStyleOptions(m.api_style_options ?? [])
     })
+  }, [])
+
+  useEffect(() => {
+    if (!currentUser?.is_admin) return
+    void loadModels()
     api.getGlobalSettings().then((s) => {
       setEffective(
         (s.effective as {
@@ -97,7 +104,7 @@ export function SettingsPage() {
         review: s.overrides.review ?? {},
       })
     })
-  }, [currentUser])
+  }, [currentUser, loadModels])
 
   if (!currentUser?.is_admin) {
     return (
@@ -332,14 +339,34 @@ export function SettingsPage() {
       {section === "models" && (
         <Card>
           <CardHeader>
+            <CardTitle>Provider</CardTitle>
+            <CardDescription>
+              Choose which LLM provider Mira uses, and log in to
+              subscription-based providers
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ProviderPicker
+              readOnly={!currentUser?.is_admin}
+              onChanged={() => void loadModels()}
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {section === "models" && (
+        <Card>
+          <CardHeader>
             <CardTitle>Models</CardTitle>
             <CardDescription>
               Choose models for indexing and PR reviews
               {backend &&
                 ` — listed from ${
-                  { openrouter: "OpenRouter", bedrock: "AWS Bedrock" }[
-                    backend
-                  ] ?? "your configured endpoint"
+                  {
+                    openrouter: "OpenRouter",
+                    bedrock: "AWS Bedrock",
+                    xai: "xAI",
+                  }[backend] ?? "your configured endpoint"
                 }`}
             </CardDescription>
           </CardHeader>
