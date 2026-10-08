@@ -6,7 +6,7 @@ import ipaddress
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import yaml
@@ -40,8 +40,13 @@ class LLMConfig(BaseModel):
     # Optional per-purpose overrides. Fall back to `model` if not set.
     indexing_model: str | None = None
     review_model: str | None = None
-    # Extended-thinking effort for reviews ("low"/"medium"/"high"; None/"off" =
-    # no reasoning). `review_reasoning_effort` is the mira.yaml-level override;
+    # Optional dedicated model for the security review pass. Falls back to
+    # `review_model`, then `model` — deliberately never to `indexing_model`:
+    # the security sweep is the highest-stakes pass and must not silently
+    # downgrade to the indexing tier.
+    security_model: str | None = None
+    # Extended-thinking effort for reviews ("off"/"low"/"medium"/"high"/"xhigh"/"max";
+    # None/"off" = no reasoning). `review_reasoning_effort` is the mira.yaml-level override;
     # `reasoning_effort` is the resolved value the provider reads (set by
     # `llm_config_for`, the same way `model` is resolved from `review_model`).
     review_reasoning_effort: str | None = None
@@ -52,6 +57,11 @@ class LLMConfig(BaseModel):
     # Provider selection. "openai" uses any OpenAI-compatible endpoint (default).
     # "bedrock" uses AWS Bedrock Converse API directly (requires boto3).
     provider: str = "openai"
+    # Protocol dialect for the OpenAI-compatible endpoint: "chat"
+    # (Chat Completions, default) or "responses" (OpenAI Responses API).
+    # Only meaningful when `provider` is "openai" — bedrock ignores it
+    # (create_llm checks provider first).
+    api_style: str = "chat"
     # Endpoint configuration. Defaults to OpenRouter but any OpenAI-compatible
     # chat-completions endpoint works — vLLM, Ollama, LiteLLM proxy, LocalAI,
     # llama.cpp server, Together, Fireworks, Groq, etc. Set api_key_env to ""
@@ -68,6 +78,12 @@ class LLMConfig(BaseModel):
     request_timeout: int = Field(default=120, ge=1)
     retry_min_wait: int = Field(default=2, ge=0)
     retry_max_wait: int = Field(default=30, ge=0)
+    # Codex CLI provider settings. Auth is handled by Codex itself through
+    # CODEX_HOME/auth.json from `codex login`; Mira does not need an OpenAI API key.
+    codex_command: str = "codex"
+    codex_home: str | None = None
+    codex_sandbox: Literal["read-only"] = "read-only"
+    codex_timeout_seconds: int = Field(default=900, gt=0)
 
     @field_validator("base_url")
     @classmethod
@@ -171,6 +187,12 @@ class ReviewConfig(BaseModel):
     focus_only_on_problems: bool = False
     walkthrough: bool = True
     walkthrough_sequence_diagram: bool = True
+    # Write an AI-generated "Summary by Mira" release-notes block into the
+    # PR/MR description body. "disable" (default) = off; "append" = add/update the
+    # marked block preserving the author's description; "replace" = set the entire
+    # body to the summary block. Requires review.walkthrough: true (content derives
+    # from the walkthrough's per-file analysis).
+    pr_summary: Literal["disable", "append", "replace"] = "disable"
     code_context: bool = True
     context_token_budget: int = 8_000
     max_concurrent_chunks: int = Field(default=5, ge=1, le=20)
@@ -192,22 +214,39 @@ class ReviewConfig(BaseModel):
     self_critique: bool = True
 
     # Run a dedicated security review pass in parallel with the main review.
-    # Uses the *indexing* tier LLM with a security-focused prompt (XSS,
-    # injection, auth bypass, CSRF, SSRF, origin validation, deserialization,
-    # crypto). The main pass on the review tier still catches deeper
-    # chained-inference security bugs — this pass is the cheap pattern-
-    # matching sweep on top. Set ``llm.indexing_model`` to the same model
-    # as ``llm.review_model`` if you want the heavy model on every pass.
-    # Findings are merged into the main review's comments list and go
-    # through the same noise filter (dedup against overlapping main-pass
-    # findings).
+    # Uses the security tier (`llm.security_model`, falling back to the
+    # review model). The main pass on the review tier still catches deeper
+    # chained-inference security bugs — this pass is the focused pattern
+    # sweep (XSS, injection, auth bypass, CSRF, SSRF, origin validation,
+    # deserialization, crypto) on top. Findings merge into the main review's
+    # comments and go through the same noise filter.
     security_pass: bool = True
 
-    # When the repo is not indexed, give the reviewer LLM tools (`read_file`,
-    # `grep_repo`) it can call to fetch cross-file context on demand. Closes
-    # the gap on Java/Go cross-file findings that JIT pre-fetch can't reach
-    # (those languages need build-system parsing to resolve imports).
-    # No effect when the repo is indexed.
+    # Agentic loop (`read_file`, `grep_repo`) for the security pass on the
+    # security-tier model, so it can verify cross-file claims before filing,
+    # like the main pass. Falls back to the one-shot call when the loop bails
+    # without a submission. Gated on `agentic_tools` plus a live source
+    # fetcher — without either, the pass runs the one-shot path unchanged.
+    security_agentic: bool = True
+
+    # Deterministic CVE check on changed dependency manifests: packages added
+    # or version-bumped by the PR are queried against OSV.dev at review time
+    # (the background poller only re-scans the repo hourly, post-merge). No
+    # LLM involved — one batch HTTP request per PR with manifest changes.
+    osv_scan: bool = True
+
+    # Deterministic regex+entropy scan of added diff lines for hardcoded
+    # keys/tokens/passwords. No LLM involved — pure in-memory regex pass,
+    # no network. Complements the LLM security pass (which has no key-format
+    # rules).
+    secrets_scan: bool = True
+
+    # Give the reviewer LLM tools (`read_file`, `grep_repo`) to fetch
+    # cross-file context on demand. On unindexed repos this closes the
+    # Java/Go gaps JIT pre-fetch can't reach; on indexed repos it lets the
+    # reviewer trace callers and dispatch points beyond the pre-fetched
+    # index context. Disable to force single-shot reviews (cheaper, less
+    # thorough).
     agentic_tools: bool = True
 
     # Whether the JIT cross-file resolver should attempt Java + Go imports.
@@ -247,6 +286,11 @@ class ReviewConfig(BaseModel):
 
 
 class IndexConfig(BaseModel):
+    # Concurrent LLM summarization batches per repo during indexing. The
+    # default suits OpenRouter-style endpoints; subscription or self-hosted
+    # endpoints with low concurrency limits need a lower value to avoid
+    # sustained 429 backoff loops during full-index runs.
+    llm_concurrency: int = Field(default=8, ge=1, le=32)
     # Skip indexing any file larger than this (bytes). Generated SDKs, vendored
     # bundles and large test fixtures burn indexing tokens for little value.
     # Defaults to the previous hard-coded tarball cap (1 MB) so it's a no-op
@@ -299,6 +343,29 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 _global_defaults: dict[str, Any] = {}
 
+_DEPLOYMENT_ONLY_LLM_KEYS = frozenset(
+    {
+        "provider",
+        "codex_command",
+        "codex_home",
+        "codex_sandbox",
+        "codex_timeout_seconds",
+    }
+)
+
+
+def _strip_deployment_only_llm_settings(overlay: dict[str, Any]) -> dict[str, Any]:
+    """Remove process-execution settings from an untrusted per-repo overlay."""
+    cleaned = dict(overlay)
+    llm = cleaned.get("llm")
+    if not isinstance(llm, dict):
+        return cleaned
+    cleaned_llm = dict(llm)
+    for key in _DEPLOYMENT_ONLY_LLM_KEYS:
+        cleaned_llm.pop(key, None)
+    cleaned["llm"] = cleaned_llm
+    return cleaned
+
 
 def set_global_defaults(config_path: Path | str) -> MiraConfig:
     """Load a deployment-wide config file once at server startup.
@@ -329,6 +396,8 @@ def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]
 def load_config(
     config_path: Path | str | None = None,
     overrides: dict[str, Any] | None = None,
+    *,
+    trust_execution_settings: bool = False,
 ) -> MiraConfig:
     """Load config, layering global defaults → per-repo `.mira.yaml` → overrides.
 
@@ -361,11 +430,17 @@ def load_config(
         path = Path(config_path)
         if not path.is_file():
             raise ConfigError(f"Config file not found: {path}")
-        data = _deep_merge(data, _load_yaml(path))
+        overlay = _load_yaml(path)
+        if not trust_execution_settings:
+            overlay = _strip_deployment_only_llm_settings(overlay)
+        data = _deep_merge(data, overlay)
     else:
         found = find_config_file()
         if found:
-            data = _deep_merge(data, _load_yaml(found))
+            overlay = _load_yaml(found)
+            if not trust_execution_settings:
+                overlay = _strip_deployment_only_llm_settings(overlay)
+            data = _deep_merge(data, overlay)
 
     if overrides:
         for key, value in overrides.items():

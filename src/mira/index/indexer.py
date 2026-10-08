@@ -15,6 +15,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader
 
 from mira.config import MiraConfig, load_config
+from mira.core.file_types import is_indexable_path, language_from_path
 from mira.index.manifests import is_manifest, parse_manifest
 from mira.index.store import DirectorySummary, ExternalRef, FileSummary, IndexStore, SymbolInfo
 from mira.llm import create_llm
@@ -37,38 +38,6 @@ class IndexingCancelled(Exception):
 
 
 _TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "llm" / "prompts" / "templates"
-
-# File extensions we index (source code only)
-_INDEXABLE_EXTENSIONS = {
-    ".py",
-    ".js",
-    ".ts",
-    ".tsx",
-    ".jsx",
-    ".go",
-    ".rs",
-    ".java",
-    ".rb",
-    ".php",
-    ".c",
-    ".cpp",
-    ".h",
-    ".hpp",
-    ".cs",
-    ".swift",
-    ".kt",
-    ".scala",
-    ".sh",
-    ".bash",
-    ".zsh",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".json",
-    ".sql",
-    ".graphql",
-    ".proto",
-}
 
 # Patterns to always skip (binaries, vendored code, lock files, etc.)
 _SKIP_PATTERNS = [
@@ -113,10 +82,10 @@ _SKIP_PATTERNS = [
 ]
 
 _FILE_FETCH_SEMAPHORE = 10
-# Concurrent LLM summarization batches per repo. The indexing model
-# typically handles 6-8 comfortably on OpenRouter; bumping from 3 nearly
-# halves file-phase wall time without changing quality.
-_LLM_SEMAPHORE = 8
+# Concurrent LLM summarization batches per repo is configurable via
+# index.llm_concurrency (see config.IndexConfig). The default of 8 suits
+# OpenRouter-style endpoints; subscription/self-hosted endpoints with low
+# concurrency limits should lower it to avoid sustained 429 backoff loops.
 # Smaller batches → faster individual calls → better wave parallelism.
 # Empirically a 5-file batch with one large file bloated to 7k output
 # tokens and took 87s, dominating an entire indexing run. With 3-file
@@ -165,8 +134,7 @@ def _should_index(path: str, exclude_patterns: list[str] | None = None) -> bool:
         for pattern in exclude_patterns:
             if fnmatch(path, pattern) or fnmatch(filename, pattern):
                 return False
-    _, ext = os.path.splitext(filename)
-    return ext.lower() in _INDEXABLE_EXTENSIONS
+    return is_indexable_path(filename)
 
 
 def _content_hash(content: str) -> str:
@@ -174,42 +142,10 @@ def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
 
 
-_EXT_LANG = {
-    ".py": "python",
-    ".js": "javascript",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".jsx": "javascript",
-    ".go": "go",
-    ".rs": "rust",
-    ".java": "java",
-    ".rb": "ruby",
-    ".php": "php",
-    ".cpp": "cpp",
-    ".c": "c",
-    ".h": "c",
-    ".hpp": "cpp",
-    ".cs": "csharp",
-    ".kt": "kotlin",
-    ".swift": "swift",
-    ".scala": "scala",
-    ".sh": "shell",
-    ".bash": "shell",
-    ".yaml": "yaml",
-    ".yml": "yaml",
-    ".toml": "toml",
-    ".json": "json",
-    ".sql": "sql",
-    ".graphql": "graphql",
-    ".proto": "protobuf",
-}
-
-
 def _language_from_path(path: str) -> str:
     """Best-effort language guess from file extension. Used for trivial-file
     entries that skip the LLM."""
-    _, ext = os.path.splitext(path)
-    return _EXT_LANG.get(ext.lower(), "")
+    return language_from_path(path)
 
 
 def _safe_call(call: Any) -> tuple[str, str]:
@@ -540,7 +476,7 @@ async def index_repo(
     # tasks and consume them as they complete; the inner semaphore bounds
     # actual parallelism. Cancellation still works between batch
     # completions.
-    llm_sem = asyncio.Semaphore(_LLM_SEMAPHORE)
+    llm_sem = asyncio.Semaphore(config.index.llm_concurrency)
     batches = _build_batches(file_pairs)
     tasks = [asyncio.create_task(_summarize_batch(batch, llm, llm_sem)) for batch in batches]
 
@@ -943,7 +879,7 @@ async def index_diff(
         file_pairs.append((path, content))
 
     # Summarize changed files
-    llm_sem = asyncio.Semaphore(_LLM_SEMAPHORE)
+    llm_sem = asyncio.Semaphore(config.index.llm_concurrency)
     indexed_count = 0
 
     if file_pairs:

@@ -10,6 +10,7 @@ import os
 import re
 import time
 from datetime import datetime
+from functools import partial
 from typing import Any
 
 from fastapi import BackgroundTasks
@@ -215,8 +216,9 @@ async def _classify_bare_approval(
         return 0
     try:
         installation_id = payload.get("installation", {}).get("id", 0)
-        token = await app_auth.get_installation_token(installation_id)
-        provider = create_provider("github", token)
+        provider = create_provider(
+            "github", partial(app_auth.get_installation_token, installation_id)
+        )
         pr_info = PRInfo(
             title="",
             description="",
@@ -398,8 +400,9 @@ async def _handle_thread_freeform_reply(
     """GitHub adapter for the free-form thread reply (see run_thread_reply)."""
     installation_id: int = payload.get("installation", {}).get("id", 0)
     try:
-        token = await app_auth.get_installation_token(installation_id)
-        provider = create_provider("github", token)
+        provider = create_provider(
+            "github", partial(app_auth.get_installation_token, installation_id)
+        )
 
         comment = payload["comment"]
         comment_id: int = comment["id"]
@@ -548,7 +551,7 @@ async def dispatch_github_event(
             owner = payload.get("repository", {}).get("owner", {}).get("login", "?")
             repo = payload.get("repository", {}).get("name", "?")
             number = payload.get("pull_request", {}).get("number", 0)
-            logger.debug(
+            logger.info(
                 "PR %s/%s#%s skipped — author %s filtered by author filter",
                 owner,
                 repo,
@@ -583,7 +586,7 @@ async def dispatch_github_event(
             elif author_is_filtered(
                 comment_user, cfg.filter.allowed_authors, cfg.filter.blocked_authors
             ):
-                logger.debug(
+                logger.info(
                     "issue_comment skipped — author %s filtered by author filter",
                     comment_user,
                 )
@@ -627,7 +630,7 @@ async def dispatch_github_event(
         if ref == f"refs/heads/{default_branch}":
             sender = payload.get("sender", {}).get("login", "")
             if author_is_filtered(sender, cfg.filter.allowed_authors, cfg.filter.blocked_authors):
-                logger.debug("push to %s skipped — author %s filtered", ref, sender)
+                logger.info("push to %s skipped — author %s filtered", ref, sender)
                 return "ignored"
             background_tasks.add_task(handle_push_index, payload, app_auth, bot_name)
             return "processing"
@@ -645,8 +648,6 @@ async def handle_pull_request(
     pr_url = ""
     repo_full = ""
     try:
-        token = await app_auth.get_installation_token(installation_id)
-
         pr = payload["pull_request"]
         owner = payload["repository"]["owner"]["login"]
         repo = payload["repository"]["name"]
@@ -654,7 +655,9 @@ async def handle_pull_request(
         pr_url = f"https://github.com/{owner}/{repo}/pull/{number}"
         repo_full = f"{owner}/{repo}"
 
-        provider = create_provider("github", token)
+        provider = create_provider(
+            "github", partial(app_auth.get_installation_token, installation_id)
+        )
         is_private = bool(payload["repository"].get("private", False))
 
         # Record the authoring contribution before review so it lands even if
@@ -690,8 +693,6 @@ async def handle_comment(
     """Handle an issue_comment event mentioning the bot."""
     installation_id: int = payload.get("installation", {}).get("id", 0)
     try:
-        token = await app_auth.get_installation_token(installation_id)
-
         comment_body: str = payload["comment"]["body"]
         comment_user: str = payload["comment"]["user"]["login"]
         names = mention_names(bot_name, await app_auth.get_bot_identity())
@@ -702,7 +703,9 @@ async def handle_comment(
         number = payload["issue"]["number"]
         pr_url = f"https://github.com/{owner}/{repo}/pull/{number}"
 
-        provider = create_provider("github", token)
+        provider = create_provider(
+            "github", partial(app_auth.get_installation_token, installation_id)
+        )
         await run_pr_command(
             provider,
             owner,
@@ -726,8 +729,6 @@ async def handle_thread_reject(
     """Handle a pull_request_review_comment that rejects a review thread."""
     installation_id: int = payload.get("installation", {}).get("id", 0)
     try:
-        token = await app_auth.get_installation_token(installation_id)
-
         comment_body: str = payload["comment"]["body"]
         comment_node_id: str = payload["comment"]["node_id"]
 
@@ -757,7 +758,9 @@ async def handle_thread_reject(
             payload["comment"],
         )
 
-        provider = create_provider("github", token)
+        provider = create_provider(
+            "github", partial(app_auth.get_installation_token, installation_id)
+        )
         from mira.models import PRInfo as _PRInfo
 
         _pr_info_for_lookup = _PRInfo(
@@ -874,8 +877,9 @@ async def handle_pr_merged(
         # Record the merge contribution (idempotent on prm:<number>).
         _record_pr_contribution(payload, "pr_merged")
 
-        token = await app_auth.get_installation_token(installation_id)
-        provider = create_provider("github", token)
+        provider = create_provider(
+            "github", partial(app_auth.get_installation_token, installation_id)
+        )
 
         from mira.models import PRInfo
 
@@ -906,8 +910,6 @@ async def handle_pause_resume(
     """Handle a pause or resume command from an issue comment."""
     installation_id: int = payload.get("installation", {}).get("id", 0)
     try:
-        token = await app_auth.get_installation_token(installation_id)
-
         owner = payload["repository"]["owner"]["login"]
         repo = payload["repository"]["name"]
         number = payload["issue"]["number"]
@@ -925,7 +927,9 @@ async def handle_pause_resume(
             repo=repo,
         )
 
-        provider = create_provider("github", token)
+        provider = create_provider(
+            "github", partial(app_auth.get_installation_token, installation_id)
+        )
 
         if command in _PAUSE_KEYWORDS:
             await provider.add_label(pr_info, PAUSE_LABEL)
