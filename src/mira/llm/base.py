@@ -303,6 +303,128 @@ class OpenAICompatibleProvider:
 
     # ── Public API (shared across chat and responses providers) ─────
 
+    def _fallback_model_id(self) -> str | None:
+        fb = (self.config.fallback_model or "").strip()
+        return fb or None
+
+    def _fallback_uses_codex_oauth(self) -> bool:
+        """Whether fallback should run via Codex CLI OAuth, not this HTTP provider.
+
+        Mira's stock fallback only swaps the model id on the same provider. That
+        breaks Grok (xAI OAuth) → Luna (Codex OAuth). Detect Codex/OpenAI ChatGPT
+        subscription model ids and route them through CodexCLIProvider instead.
+        """
+        fb = self._fallback_model_id()
+        if not fb:
+            return False
+        if self.config.provider in {"codex-cli", "codex_cli", "codex"}:
+            return False
+        bare = fb.split("/", 1)[-1].lower()
+        if fb.lower() in {"codex-default", "default"}:
+            return True
+        if bare.startswith(("gpt-", "o1", "o3", "o4", "codex")):
+            return True
+        if "luna" in bare or "codex" in bare:
+            return True
+        if fb.lower().startswith(("openai/", "codex/")):
+            return True
+        return False
+
+    def _codex_fallback_provider(self):
+        """Build a Codex CLI provider for fallback_model (bare id, no nested fallback)."""
+        from mira.llm.codex_cli import CodexCLIProvider
+
+        fb = self._fallback_model_id() or "codex-default"
+        bare = fb.split("/", 1)[-1]
+        cfg = self.config.model_copy(
+            update={
+                "provider": "codex-cli",
+                "model": bare,
+                "fallback_model": None,
+            }
+        )
+        return CodexCLIProvider(cfg)
+
+    async def _try_fallback_complete(
+        self,
+        primary_err: Exception,
+        messages: list[dict[str, str]],
+        *,
+        json_mode: bool,
+        temperature: float | None,
+        max_tokens: int | None,
+    ) -> str:
+        fb = self._fallback_model_id()
+        if not fb:
+            raise LLMError(
+                "completion_failed", model=self.config.model, error=primary_err
+            ) from primary_err
+        logger.warning(
+            "Primary model %s failed (%s), trying fallback %s%s",
+            self.config.model,
+            primary_err,
+            fb,
+            " via codex-cli OAuth" if self._fallback_uses_codex_oauth() else "",
+        )
+        try:
+            if self._fallback_uses_codex_oauth():
+                return await self._codex_fallback_provider().complete(
+                    messages,
+                    json_mode=json_mode,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            return await self._call_llm(
+                fb,
+                messages,
+                json_mode,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception as fallback_err:
+            raise LLMError(
+                "both_models_failed",
+                primary_model=self.config.model,
+                fallback_model=fb,
+                error=fallback_err,
+            ) from fallback_err
+
+    async def _try_fallback_with_tools(
+        self,
+        primary_err: Exception,
+        messages: list[dict[str, str]],
+        tools: list[dict],
+        *,
+        temperature: float | None,
+    ) -> str:
+        fb = self._fallback_model_id()
+        if not fb:
+            raise LLMError(
+                "tool_call_failed", model=self.config.model, error=primary_err
+            ) from primary_err
+        logger.warning(
+            "Primary model %s failed (%s), trying fallback %s%s",
+            self.config.model,
+            primary_err,
+            fb,
+            " via codex-cli OAuth" if self._fallback_uses_codex_oauth() else "",
+        )
+        try:
+            if self._fallback_uses_codex_oauth():
+                return await self._codex_fallback_provider().complete_with_tools(
+                    messages, tools, temperature=temperature
+                )
+            return await self._call_llm_with_tools(
+                fb, messages, tools, temperature=temperature
+            )
+        except Exception as fallback_err:
+            raise LLMError(
+                "both_models_failed",
+                primary_model=self.config.model,
+                fallback_model=fb,
+                error=fallback_err,
+            ) from fallback_err
+
     async def complete(
         self,
         messages: list[dict[str, str]],
@@ -319,31 +441,19 @@ class OpenAICompatibleProvider:
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
-        except NonRetriableLLMError:
-            raise
         except Exception as primary_err:
-            if self.config.fallback_model:
-                logger.warning(
-                    "Primary model %s failed (%s), trying fallback %s",
-                    self.config.model,
+            # Include NonRetriableLLMError so a hard primary failure can still
+            # recover via Codex OAuth fallback (Grok timeout/404 → Luna).
+            if self._fallback_model_id():
+                return await self._try_fallback_complete(
                     primary_err,
-                    self.config.fallback_model,
+                    messages,
+                    json_mode=json_mode,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
                 )
-                try:
-                    return await self._call_llm(
-                        self.config.fallback_model,
-                        messages,
-                        json_mode,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                    )
-                except Exception as fallback_err:
-                    raise LLMError(
-                        "both_models_failed",
-                        primary_model=self.config.model,
-                        fallback_model=self.config.fallback_model,
-                        error=fallback_err,
-                    ) from fallback_err
+            if isinstance(primary_err, NonRetriableLLMError):
+                raise
             raise LLMError(
                 "completion_failed", model=self.config.model, error=primary_err
             ) from primary_err
@@ -359,30 +469,13 @@ class OpenAICompatibleProvider:
             return await self._call_llm_with_tools(
                 self.config.model, messages, tools, temperature=temperature
             )
-        except NonRetriableLLMError:
-            raise
         except Exception as primary_err:
-            if self.config.fallback_model:
-                logger.warning(
-                    "Primary model %s failed (%s), trying fallback %s",
-                    self.config.model,
-                    primary_err,
-                    self.config.fallback_model,
+            if self._fallback_model_id():
+                return await self._try_fallback_with_tools(
+                    primary_err, messages, tools, temperature=temperature
                 )
-                try:
-                    return await self._call_llm_with_tools(
-                        self.config.fallback_model,
-                        messages,
-                        tools,
-                        temperature=temperature,
-                    )
-                except Exception as fallback_err:
-                    raise LLMError(
-                        "both_models_failed",
-                        primary_model=self.config.model,
-                        fallback_model=self.config.fallback_model,
-                        error=fallback_err,
-                    ) from fallback_err
+            if isinstance(primary_err, NonRetriableLLMError):
+                raise
             raise LLMError(
                 "tool_call_failed", model=self.config.model, error=primary_err
             ) from primary_err
@@ -401,7 +494,7 @@ class OpenAICompatibleProvider:
         except NonRetriableLLMError:
             raise
         except Exception as primary_err:
-            if self.config.fallback_model:
+            if self.config.fallback_model and not self._fallback_uses_codex_oauth():
                 logger.warning(
                     "Primary model %s failed (%s), trying fallback %s",
                     self.config.model,
@@ -419,6 +512,7 @@ class OpenAICompatibleProvider:
                         fallback_model=self.config.fallback_model,
                         error=fallback_err,
                     ) from fallback_err
+            # Codex CLI has no real agentic tool loop — skip cross-provider here.
             raise LLMError(
                 "agentic_failed", model=self.config.model, error=primary_err
             ) from primary_err
