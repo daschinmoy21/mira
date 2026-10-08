@@ -10,6 +10,7 @@ import sys
 from datetime import UTC
 
 import click
+import httpx
 
 from mira import __version__
 from mira.config import load_config
@@ -152,6 +153,11 @@ def main() -> None:
 @click.option("--verbose", is_flag=True, help="Enable verbose logging")
 @click.option("--config", "config_path", default=None, help="Path to .mira.yaml")
 @click.option(
+    "--trust-execution-settings",
+    is_flag=True,
+    help="Operator-only: allow --config to set Codex command, auth home, sandbox, and timeout",
+)
+@click.option(
     "--no-walkthrough",
     is_flag=True,
     help="Skip walkthrough generation. Useful in dry-run loops where only the "
@@ -175,6 +181,7 @@ def review(
     output_format: str,
     verbose: bool,
     config_path: str | None,
+    trust_execution_settings: bool,
     no_walkthrough: bool,
     bot_name: str | None,
 ) -> None:
@@ -187,6 +194,8 @@ def review(
 
     if not pr_url and not use_stdin:
         raise click.UsageError("Provide --pr <url> or --stdin")
+    if trust_execution_settings and config_path is None:
+        raise click.UsageError("--trust-execution-settings requires --config")
 
     overrides: dict[str, object] = {}
     if model:
@@ -199,7 +208,11 @@ def review(
         overrides["review.walkthrough"] = False
 
     try:
-        config = load_config(config_path, overrides)
+        config = load_config(
+            config_path,
+            overrides,
+            trust_execution_settings=trust_execution_settings,
+        )
     except MiraError as e:
         raise click.ClickException(str(e)) from e
 
@@ -207,6 +220,7 @@ def review(
 
     llm = create_llm(llm_config_for("review", config.llm))
     indexing_llm = create_llm(llm_config_for("indexing", config.llm))
+    security_llm = create_llm(llm_config_for("security", config.llm))
 
     git_token = token or github_token or os.environ.get("MIRA_GITHUB_TOKEN")
     github_provider = None
@@ -260,6 +274,7 @@ def review(
         dry_run=dry_run,
         indexing_llm=indexing_llm,
         bot_name=bot_name,
+        security_llm=security_llm,
     )
 
     try:
@@ -522,10 +537,7 @@ def serve(
     "--github-token",
     envvar="MIRA_GITHUB_TOKEN",
     default=None,
-    help=(
-        "GitHub PAT (PAT mode). Also accepts GITHUB_TOKEN. Used when App creds "
-        "are not set."
-    ),
+    help=("GitHub PAT (PAT mode). Also accepts GITHUB_TOKEN. Used when App creds are not set."),
 )
 @click.option(
     "--since",
@@ -607,3 +619,44 @@ def backfill_contributors(
             backfill_all_repos(app_auth, since=since_epoch, include_commits=include_commits)
         )
         click.echo(f"Backfill complete: {totals}")
+
+
+@main.command()
+@click.argument("provider", type=click.Choice(["xai"]))
+@click.option("--no-browser", is_flag=True, help="Print the login link instead of opening it")
+def login(provider: str, no_browser: bool) -> None:
+    """Log in to an LLM provider with your account instead of an API key.
+
+    \b
+    mira login xai   Sign in with SuperGrok / X Premium and use Grok models.
+                     Then set llm.base_url: https://api.x.ai/v1 (see README).
+    """
+    import webbrowser
+
+    from mira.llm import xai_oauth
+
+    try:
+        device = xai_oauth.request_device_code()
+        url = device.verification_uri_complete or device.verification_uri
+        click.echo(f"Open this link to sign in to xAI:\n\n  {url}\n")
+        click.echo(f"Confirm the code matches: {device.user_code}")
+        if not no_browser:
+            webbrowser.open(url)
+        click.echo("Waiting for approval...")
+        credential = xai_oauth.poll_for_tokens(device)
+        xai_oauth.save_credential(credential)
+    except (xai_oauth.XaiLoginError, httpx.HTTPError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Logged in. Credential saved to {xai_oauth.auth_file()}")
+
+
+@main.command()
+@click.argument("provider", type=click.Choice(["xai"]))
+def logout(provider: str) -> None:
+    """Remove the stored login for a provider."""
+    from mira.llm import xai_oauth
+
+    if xai_oauth.clear_credential():
+        click.echo(f"Removed {xai_oauth.auth_file()}")
+    else:
+        click.echo("No stored xAI login.")

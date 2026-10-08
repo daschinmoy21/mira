@@ -32,7 +32,7 @@ Mira reviews your pull requests using your choice of LLM (OpenRouter, Command Co
 | Area | Change |
 |------|--------|
 | **GitHub auth** | **PAT mode** — review as a personal collaborator with `MIRA_GITHUB_TOKEN` + repo/org webhooks. No GitHub App install required. Upstream App mode still works. |
-| **LLM providers** | Built-in profiles for **Command Code** (`CMD_API_KEY`) and **OpenCode Go / Zen** (`OPENCODE_API_KEY`), in addition to OpenRouter and other OpenAI-compatible endpoints. |
+| **LLM providers** | Built-in profiles for **Command Code** (`CMD_API_KEY`) and **OpenCode Go / Zen** (`OPENCODE_API_KEY`), plus **xAI Grok via SuperGrok / X Premium login** (`mira login xai`), in addition to OpenRouter and other OpenAI-compatible endpoints. |
 | **OpenCode reliability** | Retries opaque HTTP 400s from forced `tool_choice` (e.g. OpenCode Go) by falling back to `tool_choice=auto`. |
 | **Cost telemetry** | Persists real LLM tokens + billed cost per review; dashboard Cost / Spend cards show **cost by model**. Indexing estimates use **live model pricing** when available. |
 | **Dashboard UX** | Activity page no longer forces page-level horizontal scroll; cost breakdowns surface model IDs cleanly. |
@@ -118,6 +118,11 @@ llm:
   # OpenCode Zen (pay-as-you-go; same OPENCODE_API_KEY)
   # base_url: "https://opencode.ai/zen/v1"
   # api_key_env: "OPENCODE_API_KEY"
+  #
+  # xAI Grok via your SuperGrok / X Premium login — run `mira login xai` (see below)
+  # base_url: "https://api.x.ai/v1"
+  # api_style: "responses"
+  # model: "xai/grok-4.5"
 ```
 
 ```bash
@@ -159,6 +164,84 @@ One-click Railway / Fly / Render still work if you **build from this Dockerfile*
   4. Events: `pull_request`, `issue_comment`, `pull_request_review`, `pull_request_review_comment`, `push`.
 
 → [Upstream GitHub App quickstart](https://docs.miracode.ai/quickstart) · [GitLab](https://docs.miracode.ai/gitlab) · [deploy options](https://docs.miracode.ai/deployment) · [models & custom endpoints](https://docs.miracode.ai/configuration/models)
+
+### xAI Grok (SuperGrok / X Premium login)
+
+Use Grok with your xAI subscription instead of an API key — the same device-code
+sign-in the Grok Build CLI and `pi` use. On the machine that runs Mira:
+
+```bash
+mira login xai            # prints a link + code, opens your browser; approve it
+```
+
+```yaml
+# mira.yaml
+llm:
+  base_url: "https://api.x.ai/v1"
+  api_style: "responses"
+  model: "xai/grok-4.5"
+```
+
+Mira stores the token in ``, else `/xai-oauth.json`,
+else `~/.mira/xai-oauth.json` (mode 0600) and refreshes it automatically. In Docker,
+run `mira login xai --no-browser` inside the container and keep the file on the
+persistent data volume. `mira logout xai` removes it. If `XAI_API_KEY` is set it takes
+precedence over the login; keys for other services (e.g. `OPENROUTER_API_KEY`) are never
+sent to xAI. Reasoning effort `low`/`medium`/`high` is supported (`max` maps to `high`).
+Dashboard cost figures for subscription usage are API-price estimates, not billed amounts.
+
+**From the dashboard:** admins can do the same without a terminal. In **Settings** (and the
+first-run setup) the **Provider** card lets you pick *xAI Grok* or *OpenAI Codex*, and **Log in**
+shows a one-time code plus a sign-in link, then picks up the approval automatically. The model
+pickers then list that provider's models (Grok from the built-in registry plus xAI's live list;
+Codex straight from the installed CLI via `codex debug models`) with context window, price and
+reasoning badges. Switching provider swaps the endpoint for every review/indexing call; models
+that the new provider can't serve fall back to its default (`xai/grok-4.5`, `codex-default`).
+Logging out of the active provider returns Mira to the deployment default.
+
+### Codex CLI
+
+If you already use OpenAI Codex locally, Mira can run reviews through the
+Codex CLI instead of an HTTP API key. Authentication stays inside Codex via
+`CODEX_HOME/auth.json`, created by `codex login`:
+
+```yaml
+# mira.yaml
+llm:
+  provider: "codex-cli"
+  model: "codex-default"      # use the Codex CLI default model
+  codex_home: "/run/codex"    # optional; defaults to CODEX_HOME
+  codex_sandbox: "read-only"  # the only accepted sandbox policy
+  codex_timeout_seconds: 900  # optional
+```
+
+The official Mira image includes a pinned Codex CLI. Mount a Codex login read-only:
+
+```bash
+docker run -p 8000:8000 --env-file .env \
+  -e CODEX_HOME=/run/codex \
+  -v "$HOME/.codex:/run/codex:ro" \
+  -v "$(pwd)/mira.yaml:/app/mira.yaml:ro" \
+  ghcr.io/miracodeai/mira:latest --config /app/mira.yaml
+```
+
+This provider does not require `OPENROUTER_API_KEY`. You can also sign in from the dashboard (Settings → Provider → OpenAI Codex), which runs
+`codex login --device-auth` on the Mira host and stores the result under `llm.codex_home`,
+`$CODEX_HOME`, `$MIRA_CODEX_HOME`, or `$MIRA_INDEX_DIR/codex` (first one set). Mira copies only `auth.json`
+from the read-only mount into a private, writable temporary Codex home for each
+invocation. It launches Codex in an empty temporary workspace with a minimal
+environment, disables inherited shell environment variables and user/project
+rules, and enforces the read-only sandbox.
+Provider choice, executable/auth paths, sandbox policy, and timeout are
+deployment-only settings; repository `.mira.yaml` files cannot override them.
+For one-shot `mira review` runs, `--config` is treated as untrusted by default.
+An operator-owned config may opt in with `--trust-execution-settings`; never use
+that flag with a repository-controlled file.
+
+Codex CLI does not expose Mira's temperature or hard output-token controls, so
+Mira disables ensemble sampling for this provider. The mounted OAuth session is
+still a sensitive deployment credential: use a dedicated Codex account/session
+and isolate the Mira container from unrelated host files and services.
 
 ## Configuration
 

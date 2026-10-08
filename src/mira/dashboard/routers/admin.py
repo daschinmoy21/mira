@@ -61,11 +61,18 @@ async def _register_and_index_repo(platform: str, env_token: str, body: BaseMode
         store = None
         try:
             store = IndexStore.open(owner, repo, platform=platform)
-            count = await index_repo(
+            await index_repo(
                 owner=owner, repo=repo, store=store, fetcher=make_fetcher(platform, token)
             )
+            # index_repo returns files re-indexed this run, not the store total.
+            total_files = len(store.all_paths())
             _api._app_db.set_repo_status(
-                owner, repo, "ready", files_indexed=count, bump_last_indexed=True, platform=platform
+                owner,
+                repo,
+                "ready",
+                files_indexed=total_files,
+                bump_last_indexed=True,
+                platform=platform,
             )
         except EmptyRepoError as empty:
             _api._app_db.set_repo_status(owner, repo, "empty", error=str(empty), platform=platform)
@@ -147,36 +154,53 @@ async def get_models() -> ModelsResponse:
     from mira.config import load_config
     from mira.dashboard.model_catalog import active_backend, build_options, fetch_catalog
     from mira.dashboard.models_config import (
+        API_STYLES,
         THINKING_MODES,
+        apply_provider_override,
         get_indexing_model,
         get_review_model,
         get_review_thinking_mode,
+        get_security_model,
+        model_for_provider,
+        resolve_api_style,
+        resolve_provider_choice,
     )
 
     config = load_config()
+    choice = resolve_provider_choice(_api._app_db.get_setting("llm_provider"))
+    llm_config = apply_provider_override(config.llm, choice)
     db_indexing = _api._app_db.get_setting("indexing_model")
     db_review = _api._app_db.get_setting("review_model")
-    indexing = get_indexing_model(config.llm, db_indexing)
-    review = get_review_model(config.llm, db_review)
+    db_security = _api._app_db.get_setting("security_model")
+    indexing = model_for_provider(choice, get_indexing_model(llm_config, db_indexing))
+    review = model_for_provider(choice, get_review_model(llm_config, db_review))
+    security = model_for_provider(choice, get_security_model(llm_config, db_security, db_review))
     thinking = get_review_thinking_mode(
-        config.llm, _api._app_db.get_setting("review_thinking_mode")
+        llm_config, _api._app_db.get_setting("review_thinking_mode")
     )
+    api_style = resolve_api_style(llm_config, _api._app_db.get_setting("api_style"))
 
-    backend = active_backend(config.llm)
-    catalog = await fetch_catalog(config.llm)
+    backend = active_backend(llm_config)
+    catalog = await fetch_catalog(llm_config)
 
     return ModelsResponse(
         indexing_model=indexing,
         review_model=review,
+        security_model=security,
         backend=backend,
         indexing_source="dashboard" if db_indexing else "config",
         review_source="dashboard" if db_review else "config",
-        config_indexing_model=get_indexing_model(config.llm),
-        config_review_model=get_review_model(config.llm),
+        security_source="dashboard" if db_security else "config",
+        config_indexing_model=model_for_provider(choice, get_indexing_model(llm_config)),
+        config_review_model=model_for_provider(choice, get_review_model(llm_config)),
+        config_security_model=model_for_provider(choice, get_security_model(llm_config)),
         indexing_options=[ModelOption(**m) for m in build_options(backend, catalog, "indexing")],
         review_options=[ModelOption(**m) for m in build_options(backend, catalog, "review")],
+        security_options=[ModelOption(**m) for m in build_options(backend, catalog, "review")],
         review_thinking_mode=thinking or "off",
         thinking_options=[ModelOption(**m) for m in THINKING_MODES],
+        api_style=api_style,
+        api_style_options=[ModelOption(**m) for m in API_STYLES],
     )
 
 
@@ -243,12 +267,17 @@ def set_global_settings(body: GlobalSettingsUpdate, request: Request) -> dict:
 @router.put("/api/settings/models")
 def set_models(body: ModelsUpdate, request: Request) -> dict:
     _require_admin(request)
-    from mira.dashboard.models_config import THINKING_MODE_VALUES
+    from mira.dashboard.models_config import API_STYLE_VALUES, THINKING_MODE_VALUES
 
     if body.review_thinking_mode not in THINKING_MODE_VALUES:
         raise HTTPException(
             status_code=400,
             detail=f"{body.review_thinking_mode!r} is not a valid thinking mode.",
+        )
+    if body.api_style not in API_STYLE_VALUES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{body.api_style!r} is not a valid API style.",
         )
     # "" clears the override so mira.yaml is authoritative again. Any other id
     # is stored as-is — the dashboard accepts the same free-form model ids as
@@ -256,6 +285,7 @@ def set_models(body: ModelsUpdate, request: Request) -> dict:
     # registry falls back gracefully for pricing/limits of unknown ids.
     _api._app_db.set_setting("indexing_model", body.indexing_model.strip())
     _api._app_db.set_setting("review_model", body.review_model.strip())
+    _api._app_db.set_setting("security_model", body.security_model.strip())
     # Clear "off" to "" rather than persisting the literal — "off" is the
     # default, and a stored value would shadow a mira.yaml
     # `review_reasoning_effort` override. "" (not None — the column is NOT NULL)
@@ -264,6 +294,13 @@ def set_models(body: ModelsUpdate, request: Request) -> dict:
         _api._app_db.set_setting("review_thinking_mode", body.review_thinking_mode)
     else:
         _api._app_db.set_setting("review_thinking_mode", "")
+
+    # Clear "chat" (default) to "" so a stored value never shadows mira.yaml config overrides.
+    if body.api_style and body.api_style != "chat":
+        _api._app_db.set_setting("api_style", body.api_style)
+    else:
+        _api._app_db.set_setting("api_style", "")
+
     _api._app_db.mark_setup_complete()
     return {"ok": True}
 
@@ -417,10 +454,7 @@ async def get_setup_status() -> dict:
         try:
             app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
             private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
-            pat = (
-                os.environ.get("MIRA_GITHUB_TOKEN", "")
-                or os.environ.get("GITHUB_TOKEN", "")
-            )
+            pat = os.environ.get("MIRA_GITHUB_TOKEN", "") or os.environ.get("GITHUB_TOKEN", "")
             if app_id and private_key:
                 import asyncio as _asyncio
 
@@ -459,9 +493,7 @@ async def get_setup_status() -> dict:
                     if "/" in full_name:
                         owner, repo = full_name.split("/", 1)
                         _api._app_db.register_repo(owner, repo, 0)
-                        _api._app_db.set_repo_visibility(
-                            owner, repo, bool(r.get("private", False))
-                        )
+                        _api._app_db.set_repo_visibility(owner, repo, bool(r.get("private", False)))
                         repo_count += 1
                 if repos_list:
                     _asyncio.create_task(_count_files_for_repos(auth, 0, repos_list))

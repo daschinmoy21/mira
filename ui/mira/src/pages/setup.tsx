@@ -1,7 +1,8 @@
 import { Loader2 } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { useNavigate } from "react-router"
 
+import { ProviderPicker } from "@/components/dashboard/provider-picker"
 import { ModelCombobox, type ModelOption } from "@/components/model-combobox"
 import { Button } from "@/components/ui/button"
 import {
@@ -28,8 +29,9 @@ export function SetupPage() {
   const [indexingOptions, setIndexingOptions] = useState<ModelOption[]>([])
   const [reviewOptions, setReviewOptions] = useState<ModelOption[]>([])
 
-  useEffect(() => {
-    api.getModels().then((data) => {
+  // Also re-run after the provider changes: the model lists differ per provider.
+  const loadModels = useCallback(() => {
+    return api.getModels().then((data) => {
       setIndexingModel(data.indexing_source === "config" ? "" : data.indexing_model)
       setReviewModel(data.review_source === "config" ? "" : data.review_model)
       setConfigIndexingModel(data.config_indexing_model)
@@ -40,9 +42,13 @@ export function SetupPage() {
     })
   }, [])
 
+  useEffect(() => {
+    void loadModels()
+  }, [loadModels])
+
   const handleSave = async () => {
     setSaving(true)
-    await api.saveModels(indexingModel, reviewModel)
+    await api.saveModels(indexingModel, reviewModel, "")
     navigate("/")
   }
 
@@ -66,6 +72,19 @@ export function SetupPage() {
           Choose which models to use for indexing and reviews
         </p>
       </div>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Provider</CardTitle>
+          <CardDescription>
+            Use your deployment's configured provider, or log in with a
+            subscription account.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <ProviderPicker onChanged={() => void loadModels()} />
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader className="pb-3">

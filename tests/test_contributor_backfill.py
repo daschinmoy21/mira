@@ -75,7 +75,7 @@ def test_backfill_sync_records_prs_merges_reviews(db: AppDatabase) -> None:
     import mira.platforms.github.contributor_backfill as mod
 
     orig_github = mod.Github
-    mod.Github = lambda _token: gh  # type: ignore[assignment]
+    mod.Github = lambda _token, **_kw: gh  # type: ignore[assignment]
     try:
         mod._backfill_sync(db, "tok", "o", "r", None, False, counts, None)
     finally:
@@ -107,7 +107,7 @@ def test_backfill_sync_is_idempotent(db: AppDatabase) -> None:
     try:
         for _ in range(2):
             counts = {"prs": 0, "merges": 0, "reviews": 0, "commits": 0}
-            mod.Github = lambda _t: make_gh()  # type: ignore[assignment]
+            mod.Github = lambda _t, **_kw: make_gh()  # type: ignore[assignment]
             mod._backfill_sync(db, "tok", "o", "r", None, False, counts, None)
     finally:
         mod.Github = orig
@@ -122,6 +122,43 @@ def test_backfill_sync_is_idempotent(db: AppDatabase) -> None:
     # across both, the rollup totals 2 events — not 4 despite two backfills.
     days = db.get_contributor_days(alice.id, "2000-01-01", "2100-01-01")
     assert sum(d.total for d in days) == 2
+
+
+def test_maybe_wait_for_rate_limit_uses_resources_core(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PyGithub >=2.7: RateLimitOverview has no .core — read .resources.core."""
+    core = MagicMock(remaining=5000, reset=datetime(2099, 1, 1, tzinfo=UTC))
+    overview = MagicMock(spec=["resources"])
+    overview.resources.core = core
+    # Mimic prod: top-level .core must not exist.
+    del overview.core
+
+    gh = MagicMock()
+    gh.get_rate_limit.return_value = overview
+    slept: list[float] = []
+    monkeypatch.setattr(cb.time, "sleep", slept.append)
+
+    cb._maybe_wait_for_rate_limit(gh)
+    assert slept == []  # budget healthy → no sleep
+
+
+def test_maybe_wait_for_rate_limit_sleeps_when_low(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core = MagicMock(remaining=50, reset=datetime(2099, 1, 1, tzinfo=UTC))
+    overview = MagicMock()
+    overview.resources.core = core
+
+    gh = MagicMock()
+    gh.get_rate_limit.return_value = overview
+    slept: list[float] = []
+    monkeypatch.setattr(cb.time, "sleep", slept.append)
+    monkeypatch.setattr(cb.time, "time", lambda: core.reset.timestamp() - 100)
+
+    cb._maybe_wait_for_rate_limit(gh)
+    assert len(slept) == 1
+    assert slept[0] == 105  # 100s to reset + 5s buffer
 
 
 def test_backfill_commits_skips_authorless(db: AppDatabase) -> None:
@@ -224,3 +261,26 @@ def test_record_push_commits_default_branch_only(
     alice = db.get_contributor_by_login("github", "alice")
     assert alice is not None
     assert db.get_contributor_totals(alice.id)["commits"] == 1
+
+
+def test_backfill_sync_uses_configured_enterprise_url(db: AppDatabase, monkeypatch) -> None:
+    enterprise = "https://github.example.test/api/v3"
+    monkeypatch.setattr(cb, "_GITHUB_API_URL", enterprise)
+
+    gh = MagicMock()
+    pulls = MagicMock()
+    pulls.totalCount = 0
+    pulls.__iter__ = lambda self: iter([])
+    gh.get_repo.return_value.get_pulls.return_value = pulls
+
+    factory = MagicMock(return_value=gh)
+    monkeypatch.setattr(cb, "Github", factory)
+
+    counts: dict[str, int] = {"prs": 0, "merges": 0, "reviews": 0, "commits": 0}
+    cb._backfill_sync(db, "tok", "o", "r", None, False, counts, None)
+
+    factory.assert_called_once_with("tok", base_url=enterprise)
+
+
+def test_backfill_sync_defaults_to_public_github() -> None:
+    assert cb._GITHUB_API_URL == "https://api.github.com"

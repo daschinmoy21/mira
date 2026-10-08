@@ -66,10 +66,7 @@ async def sync_repos(request: Request) -> dict:
     _require_admin(request)
     app_id = os.environ.get("MIRA_GITHUB_APP_ID", "")
     private_key = os.environ.get("MIRA_GITHUB_PRIVATE_KEY", "")
-    pat = (
-        os.environ.get("MIRA_GITHUB_TOKEN", "")
-        or os.environ.get("GITHUB_TOKEN", "")
-    )
+    pat = os.environ.get("MIRA_GITHUB_TOKEN", "") or os.environ.get("GITHUB_TOKEN", "")
     if not ((app_id and private_key) or pat):
         raise HTTPException(
             status_code=400,
@@ -151,62 +148,7 @@ async def sync_repos(request: Request) -> dict:
     }
 
 
-@router.get("/api/repos/{owner}/{repo}", response_model=RepoDetail)
-def get_repo_detail(owner: str, repo: str) -> RepoDetail:
-    """Get details for a specific repo."""
-    with _open_store(owner, repo) as store:
-        paths = sorted(store.all_paths())
-        summaries = store.get_summaries(paths)
-
-        files: list[FileModel] = []
-        total_symbols = 0
-        total_imports = 0
-        total_external_refs = 0
-        total_loc = 0
-
-        for path in paths:
-            fs = summaries.get(path)
-            if fs is None:
-                continue
-            files.append(
-                FileModel(
-                    path=fs.path,
-                    language=fs.language,
-                    summary=fs.summary,
-                    symbols=[
-                        SymbolModel(name=s.name, kind=s.kind, signature=s.signature)
-                        for s in fs.symbols
-                    ],
-                    imports=fs.imports,
-                    loc=fs.loc,
-                )
-            )
-            total_symbols += len(fs.symbols)
-            total_imports += len(fs.imports)
-            total_external_refs += len(fs.external_refs)
-            total_loc += fs.loc or 0
-
-        repo_record = _api._app_db.get_repo(owner, repo)
-        last_indexed = (
-            datetime.fromtimestamp(repo_record.last_indexed_at, tz=UTC).isoformat()
-            if repo_record and repo_record.last_indexed_at
-            else None
-        )
-
-        return RepoDetail(
-            owner=owner,
-            repo=repo,
-            file_count=len(paths),
-            files=files,
-            symbols_count=total_symbols,
-            imports_count=total_imports,
-            external_refs_count=total_external_refs,
-            lines_count=total_loc,
-            last_indexed=last_indexed,
-        )
-
-
-@router.get("/api/repos/{owner}/{repo}/files", response_model=list[FileModel])
+@router.get("/api/repos/{owner:path}/{repo}/files", response_model=list[FileModel])
 def list_files(owner: str, repo: str) -> list[FileModel]:
     """List all indexed files with summaries."""
     with _open_store(owner, repo) as store:
@@ -234,7 +176,7 @@ def list_files(owner: str, repo: str) -> list[FileModel]:
         return result
 
 
-@router.get("/api/repos/{owner}/{repo}/dependencies", response_model=DependencyGraph)
+@router.get("/api/repos/{owner:path}/{repo}/dependencies", response_model=DependencyGraph)
 def get_dependencies(owner: str, repo: str) -> DependencyGraph:
     """Get the dependency graph for a repo."""
     with _open_store(owner, repo) as store:
@@ -258,7 +200,7 @@ def get_dependencies(owner: str, repo: str) -> DependencyGraph:
         return DependencyGraph(imports=imports, dependents=dependents)
 
 
-@router.get("/api/repos/{owner}/{repo}/blast-radius.svg")
+@router.get("/api/repos/{owner:path}/{repo}/blast-radius.svg")
 def get_blast_radius_svg(owner: str, repo: str) -> FastAPIResponse:
     """Render blast radius as an SVG image."""
     from mira.dashboard.blast_svg import generate_blast_svg
@@ -314,7 +256,7 @@ def get_blast_radius_svg(owner: str, repo: str) -> FastAPIResponse:
     )
 
 
-@router.get("/api/repos/{owner}/{repo}/blast-radius", response_model=BlastRadiusResponse)
+@router.get("/api/repos/{owner:path}/{repo}/blast-radius", response_model=BlastRadiusResponse)
 def get_blast_radius(owner: str, repo: str, changed_paths: str = "") -> BlastRadiusResponse:
     """Get the blast radius for a set of changed files.
 
@@ -410,7 +352,7 @@ def get_blast_radius(owner: str, repo: str, changed_paths: str = "") -> BlastRad
     return BlastRadiusResponse(internal=internal, cross_repo=cross_repo)
 
 
-@router.get("/api/repos/{owner}/{repo}/external-refs", response_model=list[ExternalRefModel])
+@router.get("/api/repos/{owner:path}/{repo}/external-refs", response_model=list[ExternalRefModel])
 def get_external_refs(owner: str, repo: str) -> list[ExternalRefModel]:
     """Get all external references for a repo."""
     with _open_store(owner, repo) as store:
@@ -428,7 +370,7 @@ def get_external_refs(owner: str, repo: str) -> list[ExternalRefModel]:
         ]
 
 
-@router.get("/api/repos/{owner}/{repo}/packages", response_model=list[PackageModel])
+@router.get("/api/repos/{owner:path}/{repo}/packages", response_model=list[PackageModel])
 def get_packages(owner: str, repo: str) -> list[PackageModel]:
     """List dependencies parsed from manifest and lockfile files.
 
@@ -461,7 +403,7 @@ def get_packages(owner: str, repo: str) -> list[PackageModel]:
     return sorted(by_key.values(), key=lambda p: (p.kind, p.name.lower()))
 
 
-@router.post("/api/repos/{owner}/{repo}/index")
+@router.post("/api/repos/{owner:path}/{repo}/index")
 async def trigger_index(owner: str, repo: str, request: Request, full: bool = False) -> dict:
     """Trigger indexing for a repo. full=true wipes and re-indexes everything."""
     _require_admin(request)
@@ -491,10 +433,7 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
         if not token:
             raise HTTPException(status_code=400, detail="MIRA_FORGEJO_TOKEN is not configured.")
     else:
-        token = (
-            os.environ.get("MIRA_GITHUB_TOKEN", "")
-            or os.environ.get("GITHUB_TOKEN", "")
-        )
+        token = os.environ.get("MIRA_GITHUB_TOKEN", "") or os.environ.get("GITHUB_TOKEN", "")
         if not token:
             try:
                 from mira.platforms.github.auth import GitHubAppAuth
@@ -560,11 +499,14 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
             )
             # Real indexing run finished — bump last_indexed_at so the
             # dashboard's "Indexed N ago" reflects this completion.
+            # `count` is files re-indexed *this run* (not the store total), so
+            # read the store for the true total to keep the repos list in sync.
+            total_files = len(store.all_paths())
             _api._app_db.set_repo_status(
                 owner,
                 repo,
                 "ready",
-                files_indexed=count,
+                files_indexed=total_files,
                 bump_last_indexed=True,
                 platform=platform,
             )
@@ -595,7 +537,7 @@ async def trigger_index(owner: str, repo: str, request: Request, full: bool = Fa
     return {"status": "indexing", "full": full}
 
 
-@router.delete("/api/repos/{owner}/{repo}/index")
+@router.delete("/api/repos/{owner:path}/{repo}/index")
 async def cancel_index(owner: str, repo: str, request: Request) -> dict:
     """Request cancellation of an in-progress indexing job.
 
@@ -613,7 +555,7 @@ async def cancel_index(owner: str, repo: str, request: Request) -> dict:
     return {"status": "not_indexing"}
 
 
-@router.get("/api/repos/{owner}/{repo}/reviews", response_model=list[ReviewEventModel])
+@router.get("/api/repos/{owner:path}/{repo}/reviews", response_model=list[ReviewEventModel])
 def list_reviews(owner: str, repo: str, limit: int = 50) -> list[ReviewEventModel]:
     """List recent review events for a repo."""
     with _open_store(owner, repo) as store:
@@ -643,3 +585,61 @@ def list_reviews(owner: str, repo: str, limit: int = 50) -> list[ReviewEventMode
             )
             for e in events
         ]
+
+
+# Keep the catch-all detail route last.  For nested GitLab namespaces it can
+# otherwise consume more specific paths such as ``.../files`` or ``.../rules``.
+@router.get("/api/repos/{owner:path}/{repo}", response_model=RepoDetail)
+def get_repo_detail(owner: str, repo: str) -> RepoDetail:
+    """Get details for a specific repo."""
+    with _open_store(owner, repo) as store:
+        paths = sorted(store.all_paths())
+        summaries = store.get_summaries(paths)
+
+        files: list[FileModel] = []
+        total_symbols = 0
+        total_imports = 0
+        total_external_refs = 0
+        total_loc = 0
+
+        for path in paths:
+            fs = summaries.get(path)
+            if fs is None:
+                continue
+            files.append(
+                FileModel(
+                    path=fs.path,
+                    language=fs.language,
+                    summary=fs.summary,
+                    symbols=[
+                        SymbolModel(name=s.name, kind=s.kind, signature=s.signature)
+                        for s in fs.symbols
+                    ],
+                    imports=fs.imports,
+                    loc=fs.loc,
+                )
+            )
+            total_symbols += len(fs.symbols)
+            total_imports += len(fs.imports)
+            total_external_refs += len(fs.external_refs)
+            total_loc += fs.loc or 0
+
+        repo_records = _api._app_db.get_repo_any_platform(owner, repo)
+        repo_record = _pick_platform_record(repo_records) if repo_records else None
+        last_indexed = (
+            datetime.fromtimestamp(repo_record.last_indexed_at, tz=UTC).isoformat()
+            if repo_record and repo_record.last_indexed_at
+            else None
+        )
+
+        return RepoDetail(
+            owner=owner,
+            repo=repo,
+            file_count=len(paths),
+            files=files,
+            symbols_count=total_symbols,
+            imports_count=total_imports,
+            external_refs_count=total_external_refs,
+            lines_count=total_loc,
+            last_indexed=last_indexed,
+        )

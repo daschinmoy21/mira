@@ -1,6 +1,7 @@
 import { Loader2 } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 
+import { ProviderPicker } from "@/components/dashboard/provider-picker"
 import { ModelCombobox, type ModelOption } from "@/components/model-combobox"
 import { Button } from "@/components/ui/button"
 import {
@@ -32,13 +33,18 @@ export function SettingsPage() {
   // "" = inherit from deployment config; anything else is a model id.
   const [indexingModel, setIndexingModel] = useState("")
   const [reviewModel, setReviewModel] = useState("")
+  const [securityModel, setSecurityModel] = useState("")
   const [configIndexingModel, setConfigIndexingModel] = useState("")
   const [configReviewModel, setConfigReviewModel] = useState("")
+  const [configSecurityModel, setConfigSecurityModel] = useState("")
   const [backend, setBackend] = useState("")
   const [indexingOptions, setIndexingOptions] = useState<ModelOption[]>([])
   const [reviewOptions, setReviewOptions] = useState<ModelOption[]>([])
+  const [securityOptions, setSecurityOptions] = useState<ModelOption[]>([])
   const [thinkingMode, setThinkingMode] = useState("off")
   const [thinkingOptions, setThinkingOptions] = useState<ModelOption[]>([])
+  const [apiStyle, setApiStyle] = useState("chat")
+  const [apiStyleOptions, setApiStyleOptions] = useState<ModelOption[]>([])
   const [savingModels, setSavingModels] = useState(false)
   const [modelsSaved, setModelsSaved] = useState(false)
 
@@ -62,19 +68,30 @@ export function SettingsPage() {
   // bucket for non-field errors.
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
 
-  useEffect(() => {
-    if (!currentUser?.is_admin) return
-    api.getModels().then((m) => {
+  // Fetch the model catalog + current selections. Re-run after the provider
+  // changes or a login completes, since the available models differ.
+  const loadModels = useCallback(() => {
+    return api.getModels().then((m) => {
       setIndexingModel(m.indexing_source === "config" ? "" : m.indexing_model)
       setReviewModel(m.review_source === "config" ? "" : m.review_model)
+      setSecurityModel(m.security_source === "config" ? "" : m.security_model)
       setConfigIndexingModel(m.config_indexing_model)
       setConfigReviewModel(m.config_review_model)
+      setConfigSecurityModel(m.config_security_model)
       setBackend(m.backend)
       setIndexingOptions(m.indexing_options)
       setReviewOptions(m.review_options)
+      setSecurityOptions(m.security_options)
       setThinkingMode(m.review_thinking_mode)
       setThinkingOptions(m.thinking_options)
+      setApiStyle(m.api_style ?? "chat")
+      setApiStyleOptions(m.api_style_options ?? [])
     })
+  }, [])
+
+  useEffect(() => {
+    if (!currentUser?.is_admin) return
+    void loadModels()
     api.getGlobalSettings().then((s) => {
       setEffective(
         (s.effective as {
@@ -87,7 +104,7 @@ export function SettingsPage() {
         review: s.overrides.review ?? {},
       })
     })
-  }, [currentUser])
+  }, [currentUser, loadModels])
 
   if (!currentUser?.is_admin) {
     return (
@@ -99,7 +116,13 @@ export function SettingsPage() {
 
   const saveModels = async () => {
     setSavingModels(true)
-    await api.saveModels(indexingModel, reviewModel, thinkingMode)
+    await api.saveModels(
+      indexingModel,
+      reviewModel,
+      securityModel,
+      thinkingMode,
+      apiStyle
+    )
     setSavingModels(false)
     setModelsSaved(true)
     setTimeout(() => setModelsSaved(false), 2000)
@@ -316,14 +339,34 @@ export function SettingsPage() {
       {section === "models" && (
         <Card>
           <CardHeader>
+            <CardTitle>Provider</CardTitle>
+            <CardDescription>
+              Choose which LLM provider Mira uses, and log in to
+              subscription-based providers
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ProviderPicker
+              readOnly={!currentUser?.is_admin}
+              onChanged={() => void loadModels()}
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {section === "models" && (
+        <Card>
+          <CardHeader>
             <CardTitle>Models</CardTitle>
             <CardDescription>
               Choose models for indexing and PR reviews
               {backend &&
                 ` — listed from ${
-                  { openrouter: "OpenRouter", bedrock: "AWS Bedrock" }[
-                    backend
-                  ] ?? "your configured endpoint"
+                  {
+                    openrouter: "OpenRouter",
+                    bedrock: "AWS Bedrock",
+                    xai: "xAI",
+                  }[backend] ?? "your configured endpoint"
                 }`}
             </CardDescription>
           </CardHeader>
@@ -355,7 +398,23 @@ export function SettingsPage() {
               </p>
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">Review Thinking Mode</label>
+              <label className="text-sm font-medium">Security Model</label>
+              <ModelCombobox
+                value={securityModel}
+                onChange={setSecurityModel}
+                options={securityOptions}
+                configModel={configSecurityModel}
+              />
+              <p className="text-xs text-muted-foreground">
+                Used for the dedicated security pass. Defaults to the review
+                model — set a cheaper one only if you accept lower security
+                recall.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">
+                Review Thinking Mode
+              </label>
               <Select value={thinkingMode} onValueChange={setThinkingMode}>
                 <SelectTrigger>
                   <SelectValue />
@@ -371,10 +430,32 @@ export function SettingsPage() {
               <p className="text-xs text-muted-foreground">
                 Extended reasoning budget for reviews — improves depth on
                 capable models at the cost of latency and tokens. Works on
-                OpenRouter and Bedrock (Claude); on other endpoints it's
-                skipped automatically when unsupported.
+                OpenRouter and Bedrock (Claude); on other endpoints it's skipped
+                automatically when unsupported.
               </p>
             </div>
+            {backend !== "bedrock" && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium">API Protocol</label>
+                <Select value={apiStyle} onValueChange={setApiStyle}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {apiStyleOptions.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Protocol used to talk to this endpoint. Responses API requires
+                  a server exposing /responses (OpenAI and compatible proxies);
+                  Chat Completions works everywhere.
+                </p>
+              </div>
+            )}
             <div className="flex items-center gap-3">
               <Button size="sm" onClick={saveModels} disabled={savingModels}>
                 {savingModels && (

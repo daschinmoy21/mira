@@ -21,14 +21,16 @@ from mira.core.file_filter import filter_files
 from mira.core.noise_filter import drop_already_posted, filter_noise
 from mira.core.passes import (
     agentic_review_loop,
+    cap_review_summary,
     dependency_review_pass,
+    generate_pr_summary,
     regenerate_summary,
     security_review_pass,
     self_critique,
 )
 from mira.core.priority import rank_files
 from mira.core.threads import resolve_verified_threads, short_thread_description
-from mira.exceptions import ResponseParseError
+from mira.exceptions import MiraError, ResponseParseError
 from mira.index.context import build_code_context
 from mira.index.manifests import _is_lockfile_path, is_manifest
 from mira.index.store import IndexStore
@@ -43,6 +45,8 @@ from mira.llm.response_parser import (
     parse_walkthrough_response,
 )
 from mira.models import (
+    PR_SUMMARY_END,
+    PR_SUMMARY_START,
     WALKTHROUGH_MARKER,
     FileChangeType,
     KeyIssue,
@@ -59,6 +63,7 @@ from mira.models import (
     build_review_stats,
 )
 from mira.providers.base import BaseProvider
+from mira.security.secrets_scan import scan_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +86,35 @@ def _audit_stage(audit: list[dict], stage: str, before: list, after: list) -> No
     """Record comments present before a stage but gone after it (identity-based)."""
     kept = {id(c) for c in after}
     audit.extend(_audit_drop(c, stage) for c in before if id(c) not in kept)
+
+
+def compose_pr_description(current_body: str, summary_block: str, mode: str) -> str:
+    """Build the new PR/MR description body from the summary block and mode.
+
+    append: preserve existing body; insert/replace the marked summary block
+            (idempotent across re-reviews — only the block between the markers
+            is swapped, author content before/after is kept).
+    replace: the summary block becomes the entire body.
+    """
+    if mode == "replace":
+        return summary_block
+    # append
+    # Only treat the markers as a block boundary when START exists and a
+    # following END terminates it. A lone START or a lone/orphan END (e.g.
+    # END authored before START) falls back to append-at-end, keeping
+    # re-reviews idempotent.
+    start_pos = current_body.find(PR_SUMMARY_START)
+    end_pos = current_body.find(PR_SUMMARY_END, start_pos) if start_pos != -1 else -1
+    if end_pos != -1:
+        before = current_body[:start_pos]
+        after = current_body[end_pos + len(PR_SUMMARY_END) :]
+        rebuilt = before.rstrip() + "\n\n" + summary_block
+        if after.strip():
+            rebuilt += "\n\n" + after.strip()
+        return rebuilt.strip()
+    if current_body.strip():
+        return current_body.rstrip() + "\n\n" + summary_block
+    return summary_block
 
 
 def _clamp_confidence_to_findings(
@@ -130,9 +164,6 @@ def _clamp_confidence_to_findings(
 # Paths excluded from the dedicated security pass — see core/passes.py.
 # Keep conservative: anything that might house auth/crypto/origin/injection logic stays in.
 _SECURITY_PASS_SKIP_PATTERNS = (
-    # DB migrations: schema changes, indexes — no request handling.
-    "db/migrate/",
-    "/migrations/",
     # Tests: assertions about behavior, not the behavior itself.
     "spec/",
     "/__tests__/",
@@ -183,7 +214,7 @@ def _security_relevant_files(files: list) -> list:
     """Return the subset of files plausibly containing security findings.
 
     The dedicated security pass runs as one LLM call across the entire
-    diff. When the diff is dominated by migrations / specs / lockfiles,
+    diff. When the diff is dominated by specs / lockfiles,
     those non-code files dilute attention away from the actual vulnerable
     code. This filter trims the obvious-no-finding cases so the model can
     focus.
@@ -386,10 +417,12 @@ class ReviewEngine:
         bot_name: str = "miracodeai",
         dry_run: bool = False,
         indexing_llm: LLMProviderProtocol | None = None,
+        security_llm: LLMProviderProtocol | None = None,
     ) -> None:
         self.config = config
         self.llm = llm
         self.indexing_llm = indexing_llm or llm
+        self.security_llm = security_llm or llm
         self.provider = provider
         self.bot_name = bot_name
         self.dry_run = dry_run
@@ -417,6 +450,17 @@ class ReviewEngine:
         await self.provider.post_comment(pr_info, placeholder)
         return await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
 
+    @staticmethod
+    def _format_failure_notice(exc: BaseException) -> str:
+        """Format a user-safe failure notice without model names or internal errors."""
+        message = exc.safe_message if isinstance(exc, MiraError) else type(exc).__name__
+        return (
+            f"The code review failed to complete due to an unexpected error.\n\n"
+            f"**Stage:** Code review\n"
+            f"**Error type:** `{type(exc).__name__}`\n"
+            f"**Message:** {message}"
+        )
+
     async def _detect_overlaps_safe(
         self,
         pr_info: PRInfo,
@@ -442,7 +486,7 @@ class ReviewEngine:
             if not current_paths:
                 return []
 
-            store = IndexStore.open(pr_info.owner, pr_info.repo)
+            store = IndexStore.open(pr_info.owner, pr_info.repo, platform=pr_info.platform)
             try:
                 symbols: set[str] = set()
                 for path in current_paths:
@@ -546,6 +590,8 @@ class ReviewEngine:
             except Exception as exc:
                 logger.warning("Failed to post walkthrough placeholder: %s", exc)
 
+        _walkthrough_result: list[WalkthroughResult | None] = [None]
+
         async def _on_walkthrough_ready(wt: WalkthroughResult | None) -> None:
             if self.dry_run or wt is None or placeholder_id is None:
                 return
@@ -555,6 +601,7 @@ class ReviewEngine:
                     in_progress=True,
                 )
                 await self.provider.update_comment(pr_info, placeholder_id, markdown)
+                _walkthrough_result[0] = wt
             except Exception as exc:
                 logger.warning("Failed to post in-progress walkthrough: %s", exc)
 
@@ -673,9 +720,50 @@ class ReviewEngine:
                 resolved_threads=resolved_thread_dicts or None,
                 team_conventions=team_conventions,
             )
-        except BaseException:
+        except BaseException as exc:
             if overlap_task is not None:
                 overlap_task.cancel()
+
+            # Await the in-progress walkthrough notification BEFORE updating the
+            # comment. If the walkthrough LLM call resolved but the callback
+            # hasn't run yet, this lets it post the in-progress content and
+            # store the result so we can re-render it below. If it fails or
+            # times out, we suppress and fall back to the bare failure notice.
+            notify_task = getattr(self, "_walkthrough_notify_task", None)
+            if notify_task is not None:
+                with contextlib.suppress(Exception):
+                    await notify_task
+                self._walkthrough_notify_task = None
+
+            # Update placeholder so the user knows the review failed.
+            # If the walkthrough already landed, re-render it without the
+            # in-progress banner and append the failure notice — preserves
+            # walkthrough content while removing the stuck "in progress" state.
+            if placeholder_id is not None:
+                try:
+                    wt = _walkthrough_result[0]
+                    if wt is not None:
+                        failure_body = wt.to_markdown(
+                            bot_name=self.bot_name or "miracodeai",
+                            in_progress=False,
+                            failure_notice=self._format_failure_notice(exc),
+                        )
+                    else:
+                        failure_body = (
+                            f"{WALKTHROUGH_MARKER}\n"
+                            "## Mira PR Walkthrough\n\n"
+                            "---\n\n"
+                            "<details>\n"
+                            "<summary><b>❌ Review failed</b> — click for details</summary>\n\n"
+                            f"{self._format_failure_notice(exc)}\n\n"
+                            "</details>\n"
+                        )
+                    await self.provider.update_comment(pr_info, placeholder_id, failure_body)
+                except Exception as comment_exc:
+                    logger.warning(
+                        "Failed to update placeholder on review failure: %s", comment_exc
+                    )
+
             raise
 
         # The final walkthrough must land after the in-progress one, or it gets
@@ -803,6 +891,24 @@ class ReviewEngine:
             except Exception as exc:
                 logger.warning("Failed to finalize walkthrough placeholder: %s", exc)
 
+        if (
+            self.config.review.pr_summary != "disable"
+            and not self.dry_run
+            and result.pr_summary_block
+        ):
+            try:
+                block = (
+                    f"{PR_SUMMARY_START}\n## Summary by Mira\n\n"
+                    f"{result.pr_summary_block}\n{PR_SUMMARY_END}"
+                )
+                current_body = await self.provider.get_pr_description(pr_info)
+                new_body = compose_pr_description(
+                    current_body, block, self.config.review.pr_summary
+                )
+                await self.provider.update_pr_description(pr_info, new_body)
+            except Exception as exc:
+                logger.warning("Failed to update PR description summary: %s", exc)
+
         logger.info(
             "Thread resolution for PR %s: checked %d, resolved %d",
             pr_info.url,
@@ -832,7 +938,7 @@ class ReviewEngine:
 
             from mira.models import Severity
 
-            store = IndexStore.open(pr_info.owner, pr_info.repo)
+            store = IndexStore.open(pr_info.owner, pr_info.repo, platform=pr_info.platform)
             blocker_count = sum(1 for c in result.comments if c.severity == Severity.BLOCKER)
             warning_count = sum(1 for c in result.comments if c.severity == Severity.WARNING)
             suggestion_count = sum(
@@ -1047,7 +1153,7 @@ class ReviewEngine:
             try:
                 pr_info = getattr(self, "_pr_info", None)
                 if pr_info is not None:
-                    store = IndexStore.open(pr_info.owner, pr_info.repo)
+                    store = IndexStore.open(pr_info.owner, pr_info.repo, platform=pr_info.platform)
                     source_fetcher = None
                     if self.provider and pr_info:
                         from mira.index.context import ProviderSourceFetcher
@@ -1071,28 +1177,29 @@ class ReviewEngine:
                     index_has_data_for_changed = bool(store.get_summaries(changed_paths))
                     self._jit_needed = not index_has_data_for_changed
                     self._index_was_empty = not bool(store.all_paths())
+
+                    # Hoisted: agentic fetcher/tree setup runs whenever a source fetcher exists
+                    # (indexed or not), so the reviewer tools are available on indexed repos too.
+                    tree_paths: set[str] | None = None
+                    if source_fetcher is not None and (
+                        self.config.review.agentic_tools or not index_has_data_for_changed
+                    ):
+                        self._agentic_source_fetcher = source_fetcher
+                        if hasattr(self.provider, "get_repo_tree"):
+                            try:
+                                tree_paths = set(
+                                    await self.provider.get_repo_tree(pr_info, pr_info.head_branch)
+                                )
+                            except Exception as exc:
+                                logger.debug("Repo tree fetch failed: %s", exc)
+                        self._agentic_repo_tree = sorted(tree_paths) if tree_paths else []
+
                     if not index_has_data_for_changed and source_fetcher is not None:
                         try:
                             from mira.index.jit_context import (
                                 build_jit_cross_file_context,
                             )
 
-                            tree_paths: set[str] | None = None
-                            if hasattr(self.provider, "get_repo_tree"):
-                                try:
-                                    tree_paths = set(
-                                        await self.provider.get_repo_tree(
-                                            pr_info,
-                                            pr_info.head_branch,
-                                        )
-                                    )
-                                except Exception as exc:
-                                    logger.debug(
-                                        "JIT: tree fetch failed: %s",
-                                        exc,
-                                    )
-                            self._agentic_source_fetcher = source_fetcher
-                            self._agentic_repo_tree = sorted(tree_paths) if tree_paths else []
                             jit = await build_jit_cross_file_context(
                                 changed_files=filtered,
                                 source_fetcher=source_fetcher,
@@ -1187,7 +1294,9 @@ class ReviewEngine:
         try:
             pr_info = getattr(self, "_pr_info", None)
             if pr_info is not None:
-                _rules_store = IndexStore.open(pr_info.owner, pr_info.repo)
+                _rules_store = IndexStore.open(
+                    pr_info.owner, pr_info.repo, platform=pr_info.platform
+                )
 
                 learned_rules = _rules_store.get_learned_rules_text()
 
@@ -1263,7 +1372,6 @@ class ReviewEngine:
                     raw_response = ""
                     use_agentic = (
                         self.config.review.agentic_tools
-                        and getattr(self, "_jit_needed", False)
                         and self._agentic_source_fetcher is not None
                     )
                     if use_agentic:
@@ -1283,6 +1391,12 @@ class ReviewEngine:
                     # majority-vote findings. The agentic loop (if any) only
                     # runs once; extras sample the plain review path.
                     n_runs = self.config.review.ensemble_runs
+                    if n_runs > 1 and not getattr(self.llm, "supports_temperature", True):
+                        logger.warning(
+                            "Provider does not support temperature controls; "
+                            "disabling ensemble runs"
+                        )
+                        n_runs = 1
                     if n_runs > 1:
                         extra_raws = await _asyncio.gather(
                             *[
@@ -1335,13 +1449,31 @@ class ReviewEngine:
                     return [], [], ""
 
         review_task = _asyncio.gather(*[_review_chunk(i, c) for i, c in enumerate(chunks)])
+        # Per-chunk executors (fresh per call) so each chunk gets its own
+        # 50KB tool-output budget; one shared executor would let an early
+        # chunk exhaust the budget and wedge later chunks.
+        _security_executor_factory = None
+        if (
+            self.config.review.security_agentic
+            and self.config.review.agentic_tools
+            and self._agentic_source_fetcher is not None
+        ):
+            from mira.llm.agentic_tools import AgenticToolExecutor
+
+            def _security_executor_factory() -> AgenticToolExecutor:
+                return AgenticToolExecutor(
+                    source_fetcher=self._agentic_source_fetcher,
+                    repo_tree=list(self._agentic_repo_tree),
+                )
+
         security_task = _asyncio.create_task(
             security_review_pass(
                 self.llm,
                 filtered,
                 _security_relevant_files(filtered),
                 pr_title,
-                indexing_llm=self.indexing_llm,
+                security_llm=self.security_llm,
+                agentic_executor_factory=_security_executor_factory,
             )
             if self.config.review.security_pass
             else _asyncio.sleep(0, result=[])
@@ -1353,11 +1485,14 @@ class ReviewEngine:
         # present (empty list on an unindexed repo — pass falls back to the diff).
         manifest_files = manifest_candidates
         existing_packages: list[str] = []
+        pr_source_fetcher = None
         if manifest_files:
             pr_info = getattr(self, "_pr_info", None)
             if pr_info is not None:
                 try:
-                    _pkg_store = IndexStore.open(pr_info.owner, pr_info.repo)
+                    _pkg_store = IndexStore.open(
+                        pr_info.owner, pr_info.repo, platform=pr_info.platform
+                    )
                     try:
                         existing_packages = sorted(
                             {p.name for p in _pkg_store.list_manifest_packages()}
@@ -1366,6 +1501,12 @@ class ReviewEngine:
                         _pkg_store.close()
                 except Exception as exc:
                     logger.debug("Manifest package lookup failed: %s", exc)
+                if self.provider is not None:
+                    from mira.index.context import ProviderSourceFetcher
+
+                    pr_source_fetcher = ProviderSourceFetcher(
+                        self.provider, pr_info, pr_info.head_branch
+                    )
         dependency_task = _asyncio.create_task(
             dependency_review_pass(
                 self.llm,
@@ -1378,8 +1519,28 @@ class ReviewEngine:
             else _asyncio.sleep(0, result=[])
         )
 
-        chunk_results, security_comments, dependency_comments = await _asyncio.gather(
-            review_task, security_task, dependency_task
+        from mira.security.pr_scan import scan_manifest_changes
+
+        osv_task = _asyncio.create_task(
+            scan_manifest_changes(manifest_files, pr_source_fetcher)
+            if manifest_files and self.config.review.osv_scan and pr_source_fetcher is not None
+            else _asyncio.sleep(0, result=[])
+        )
+
+        secrets_task = _asyncio.create_task(
+            scan_secrets(filtered)
+            if filtered and self.config.review.secrets_scan
+            else _asyncio.sleep(0, result=[])
+        )
+
+        (
+            chunk_results,
+            security_comments,
+            dependency_comments,
+            osv_comments,
+            secrets_comments,
+        ) = await _asyncio.gather(
+            review_task, security_task, dependency_task, osv_task, secrets_task
         )
 
         all_comments: list[ReviewComment] = []
@@ -1393,7 +1554,12 @@ class ReviewEngine:
                 summaries.append(summary_text)
         audit.append({"stage": "drafted", "chunk": "security", "count": len(security_comments)})
         all_comments.extend(security_comments)
+        audit.append({"stage": "drafted", "chunk": "dependency", "count": len(dependency_comments)})
         all_comments.extend(dependency_comments)
+        audit.append({"stage": "drafted", "chunk": "osv", "count": len(osv_comments)})
+        all_comments.extend(osv_comments)
+        audit.append({"stage": "drafted", "chunk": "secrets", "count": len(secrets_comments)})
+        all_comments.extend(secrets_comments)
 
         all_comments = [classify_severity(c) for c in all_comments]
 
@@ -1459,15 +1625,39 @@ class ReviewEngine:
             except Exception as exc:
                 logger.warning("Summary regeneration failed, using original: %s", exc)
                 summary = original_summary or "No issues found."
+            summary = cap_review_summary(summary)
         else:
             summary = ""
 
         walkthrough = await walkthrough_task
 
+        pr_summary_block = ""
+        # Only generate when the result can actually be posted: the dry-run
+        # and stdin (no-provider) paths never write the description, so the
+        # indexing-tier LLM call would be discarded.
+        if (
+            self.config.review.pr_summary != "disable"
+            and walkthrough is not None
+            and not self.dry_run
+            and self.provider is not None
+        ):
+            try:
+                pr_summary_block = await generate_pr_summary(
+                    self.llm,
+                    walkthrough,
+                    pr_title,
+                    pr_description,
+                    indexing_llm=self.indexing_llm,
+                )
+            except Exception as exc:
+                logger.warning("PR summary generation failed: %s", exc)
+                pr_summary_block = ""
+
         return ReviewResult(
             comments=final_comments,
             key_issues=all_key_issues,
             summary=summary,
+            pr_summary_block=pr_summary_block,
             reviewed_files=len(filtered),
             token_usage=self.llm.usage,
             walkthrough=walkthrough,

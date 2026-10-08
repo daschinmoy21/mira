@@ -17,12 +17,16 @@ PROTECTED = [
     ("/api/forgejo/sync", "POST", {}),
     ("/api/forgejo/repos", "POST", {"body": None}),
     ("/api/settings/models", "PUT", {"body": None}),
+    ("/api/settings/provider", "PUT", {"body": None}),
+    ("/api/settings/provider/{provider}/login", "POST", {"provider": "xai"}),
+    ("/api/settings/provider/{provider}/login/status", "GET", {"provider": "xai"}),
+    ("/api/settings/provider/{provider}/logout", "POST", {"provider": "xai"}),
     ("/api/uninstalls/{installation_id}/keep", "POST", {"installation_id": 1}),
     ("/api/uninstalls/{installation_id}/delete", "POST", {"installation_id": 1}),
     ("/api/setup/complete", "POST", {"body": None}),
     ("/api/repos/sync", "POST", {}),
-    ("/api/repos/{owner}/{repo}/index", "POST", {"owner": "o", "repo": "r"}),
-    ("/api/repos/{owner}/{repo}/index", "DELETE", {"owner": "o", "repo": "r"}),
+    ("/api/repos/{owner:path}/{repo}/index", "POST", {"owner": "o", "repo": "r"}),
+    ("/api/repos/{owner:path}/{repo}/index", "DELETE", {"owner": "o", "repo": "r"}),
 ]
 
 

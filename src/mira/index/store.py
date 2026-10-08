@@ -45,6 +45,7 @@ def _review_event_from_row(r: tuple) -> ReviewEvent:
         model=r[22] or "",
     )
 
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
     path TEXT PRIMARY KEY,

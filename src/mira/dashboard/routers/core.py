@@ -64,14 +64,24 @@ async def estimate_cost() -> CostEstimate:
     """Estimate indexing cost using the configured backend's model pricing."""
     from mira.config import load_config
     from mira.dashboard.model_catalog import fetch_catalog
-    from mira.dashboard.models_config import estimate_indexing_cost, get_indexing_model
+    from mira.dashboard.models_config import (
+        apply_provider_override,
+        estimate_indexing_cost,
+        get_indexing_model,
+        model_for_provider,
+        resolve_provider_choice,
+    )
 
     config = load_config()
-    model = get_indexing_model(config.llm, _api._app_db.get_setting("indexing_model"))
+    choice = resolve_provider_choice(_api._app_db.get_setting("llm_provider"))
+    llm_config = apply_provider_override(config.llm, choice)
+    model = model_for_provider(
+        choice, get_indexing_model(llm_config, _api._app_db.get_setting("indexing_model"))
+    )
     total_files = sum(
         r.file_count_estimate for r in _api._app_db.list_repos() if r.status == "pending"
     )
-    catalog = await fetch_catalog(config.llm)
+    catalog = await fetch_catalog(llm_config)
     live = next((item for item in (catalog or []) if item.get("value") == model), None)
     pricing = None
     if live and "input_cost_per_1m" in live and "output_cost_per_1m" in live:
@@ -217,7 +227,9 @@ def get_org_stats(period: str = "") -> OrgStatsModel:
 
     for repo_record in repos:
         try:
-            store = IndexStore.open(repo_record.owner, repo_record.repo)
+            store = IndexStore.open(
+                repo_record.owner, repo_record.repo, platform=repo_record.platform
+            )
             total_files += len(store.all_paths())
             stats = store.get_review_stats(since=since)
             agg_stats["total_reviews"] += stats["total_reviews"]
@@ -236,9 +248,9 @@ def get_org_stats(period: str = "") -> OrgStatsModel:
             for cat, cnt in stats.get("categories", {}).items():
                 agg_stats["categories"][cat] = agg_stats["categories"].get(cat, 0) + cnt
             for model, cost in stats.get("cost_by_model", {}).items():
-                agg_stats["cost_by_model"][model] = (
-                    float(agg_stats["cost_by_model"].get(model, 0)) + float(cost or 0)
-                )
+                agg_stats["cost_by_model"][model] = float(
+                    agg_stats["cost_by_model"].get(model, 0)
+                ) + float(cost or 0)
             if stats["total_reviews"] > 0:
                 duration_sum += stats["avg_duration_ms"] * stats["total_reviews"]
                 review_count += stats["total_reviews"]
@@ -250,9 +262,7 @@ def get_org_stats(period: str = "") -> OrgStatsModel:
     agg_stats["total_cost_usd"] = round(float(agg_stats["total_cost_usd"]), 6)
     agg_stats["cost_by_model"] = {
         k: round(float(v), 6)
-        for k, v in sorted(
-            agg_stats["cost_by_model"].items(), key=lambda kv: (-kv[1], kv[0])
-        )
+        for k, v in sorted(agg_stats["cost_by_model"].items(), key=lambda kv: (-kv[1], kv[0]))
     }
 
     agg_stats["avg_duration_ms"] = int(duration_sum / review_count) if review_count > 0 else 0
@@ -286,7 +296,9 @@ def get_timeseries(period: str = "day") -> list[TimeSeriesPoint]:
 
     for repo_record in _api._app_db.list_repos():
         try:
-            store = IndexStore.open(repo_record.owner, repo_record.repo)
+            store = IndexStore.open(
+                repo_record.owner, repo_record.repo, platform=repo_record.platform
+            )
             for e in store.list_review_events(limit=500):
                 all_events.append(
                     {

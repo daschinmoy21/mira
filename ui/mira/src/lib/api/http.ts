@@ -58,3 +58,19 @@ export async function patchJson<T>(path: string, body?: unknown): Promise<T> {
   if (!res.ok) throw new Error(`API error ${res.status}: ${await res.text()}`)
   return res.json() as Promise<T>
 }
+
+// Extract a human-readable message from an error thrown by the helpers above.
+// They throw `API error NNN: <body>`; when the body is FastAPI's
+// `{"detail": "..."}` return just the detail, otherwise the raw message.
+export function errorMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err)
+  try {
+    const parsed = JSON.parse(raw.replace(/^API error \d+: /, "")) as {
+      detail?: unknown
+    }
+    if (typeof parsed.detail === "string") return parsed.detail
+  } catch {
+    /* not JSON — fall through */
+  }
+  return raw
+}

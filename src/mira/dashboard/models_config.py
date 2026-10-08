@@ -19,18 +19,91 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
 }
 
 # Thinking-mode options for the review model. "off" disables extended thinking
-# (today's behavior); low/medium/high map to OpenRouter's unified
-# ``reasoning.effort``. Single source for the dashboard dropdown and validation.
+# (today's behavior); low/medium/high/xhigh map to the provider's unified
+# ``reasoning.effort``; "max" is a top level remapped per provider (OpenRouter
+# sends it as "xhigh"). Single source for the dashboard dropdown and validation.
 THINKING_MODES: list[dict[str, str]] = [
     {"value": "off", "label": "Off"},
     {"value": "low", "label": "Low"},
     {"value": "medium", "label": "Medium"},
     {"value": "high", "label": "High"},
-    # DeepSeek's top "max" level (sent as "xhigh" on OpenRouter, which rejects
-    # "max"). Not every provider supports it.
+    {"value": "xhigh", "label": "XHigh"},
+    # Top "max" level (sent as "xhigh" on OpenRouter, which rejects "max").
+    # Sits above "xhigh". Not every provider supports it.
     {"value": "max", "label": "Max"},
 ]
 THINKING_MODE_VALUES = {m["value"] for m in THINKING_MODES}
+
+# API-protocol options for the Models page. Single source for the dropdown
+# and validation, mirroring THINKING_MODES.
+API_STYLES: list[dict[str, str]] = [
+    {"value": "chat", "label": "Chat Completions"},
+    {"value": "responses", "label": "Responses API"},
+]
+API_STYLE_VALUES = {m["value"] for m in API_STYLES}
+
+# Provider selection from the Settings page. "default" leaves the deployment's
+# mira.yaml/env wiring alone; the others swap in a subscription-login backend.
+# Single source for validation and the dashboard's provider list.
+PROVIDER_DEFAULT = "default"
+PROVIDER_XAI = "xai"
+PROVIDER_CODEX = "codex-cli"
+PROVIDER_VALUES = (PROVIDER_DEFAULT, PROVIDER_XAI, PROVIDER_CODEX)
+XAI_BASE_URL = "https://api.x.ai/v1"
+XAI_DEFAULT_MODEL = "xai/grok-4.5"
+CODEX_DEFAULT_MODEL = "codex-default"
+
+
+def resolve_provider_choice(db_value: str | None) -> str:
+    """The stored provider override, or "default" when unset/unknown."""
+    return db_value if db_value in PROVIDER_VALUES else PROVIDER_DEFAULT
+
+
+def apply_provider_override(base: LLMConfig, choice: str) -> LLMConfig:
+    """Return ``base`` re-pointed at the chosen subscription provider.
+
+    Only the provider wiring changes; deployment-only Codex settings
+    (``codex_command``, ``codex_home``, sandbox, timeout) always come from the
+    operator's config, never from the dashboard.
+    """
+    if choice == PROVIDER_XAI:
+        return base.model_copy(
+            update={
+                "provider": "openai",
+                "base_url": XAI_BASE_URL,
+                "api_key_env": "XAI_API_KEY",
+                "api_style": "responses",
+            }
+        )
+    if choice == PROVIDER_CODEX:
+        return base.model_copy(update={"provider": "codex-cli"})
+    return base
+
+
+def model_for_provider(choice: str, model: str) -> str:
+    """Keep ``model`` if the chosen provider can serve it, else its default.
+
+    Switching provider leaves previously chosen models (e.g. an OpenRouter
+    id) in the config/DB; sending those to xAI or Codex would fail every
+    review, so fall back to the provider's default instead.
+    """
+    if choice == PROVIDER_XAI:
+        bare = model.split("/", 1)[1] if "/" in model else model
+        if model.startswith("xai/") or (("/" not in model) and bare.startswith("grok")):
+            return model
+        return XAI_DEFAULT_MODEL
+    if choice == PROVIDER_CODEX:
+        if model and "/" not in model:
+            return model
+        return CODEX_DEFAULT_MODEL
+    return model
+
+
+def resolve_api_style(config: LLMConfig, db_value: str | None = None) -> str:
+    """Resolve the API protocol: DB → config.api_style → "chat"."""
+    if db_value and db_value in API_STYLE_VALUES:
+        return db_value
+    return config.api_style if config.api_style in API_STYLE_VALUES else "chat"
 
 
 def estimate_indexing_cost(
@@ -76,6 +149,28 @@ def get_review_model(config: LLMConfig, db_value: str | None = None) -> str:
     return config.model
 
 
+def get_security_model(
+    config: LLMConfig,
+    db_value: str | None = None,
+    db_review_model: str | None = None,
+) -> str:
+    """Resolve the security-pass model: DB → config.security_model → review tier.
+
+    The review-tier fallback includes the dashboard's review_model setting
+    (``db_review_model``) — without it, an instance whose review model lives
+    only in the DB silently falls all the way back to ``config.model``.
+
+    Never falls back to ``indexing_model`` — the security sweep is the
+    highest-stakes cheap pass, and silently downgrading it to the indexing
+    tier trades security recall for indexing cost savings.
+    """
+    if db_value:
+        return db_value
+    if config.security_model:
+        return config.security_model
+    return get_review_model(config, db_review_model)
+
+
 def get_review_thinking_mode(config: LLMConfig, db_value: str | None = None) -> str | None:
     """Resolve the review thinking mode: DB → config.review_reasoning_effort → None.
 
@@ -99,6 +194,9 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
     """
     db_model: str | None = None
     db_thinking: str | None = None
+    db_review: str | None = None
+    db_style: str | None = None
+    db_provider: str | None = None
     try:
         from mira.dashboard.api import _app_db
 
@@ -108,21 +206,46 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
             elif purpose == "review":
                 db_model = _app_db.get_setting("review_model")
                 db_thinking = _app_db.get_setting("review_thinking_mode")
+            elif purpose == "security":
+                db_model = _app_db.get_setting("security_model")
+                db_thinking = _app_db.get_setting("review_thinking_mode")
+                db_review = _app_db.get_setting("review_model")
+            db_style = _app_db.get_setting("api_style")
+            db_provider = _app_db.get_setting("llm_provider")
     except Exception:
         pass  # DB not available — resolve from config fields alone
 
+    provider_choice = resolve_provider_choice(db_provider)
+    base = apply_provider_override(base, provider_choice)
+
     # Thinking mode only applies to reviews; other purposes leave it off.
     thinking_mode: str | None = None
+    resolved_style = resolve_api_style(base, db_style)
     if purpose == "indexing":
         resolved = get_indexing_model(base, db_model)
+        resolved = model_for_provider(provider_choice, resolved)
         config_model = base.indexing_model
+    elif purpose == "security":
+        resolved = get_security_model(base, db_model, db_review)
+        resolved = model_for_provider(provider_choice, resolved)
+        config_model = base.security_model or base.review_model
+        thinking_mode = get_review_thinking_mode(base, db_thinking)
     elif purpose == "review":
         resolved = get_review_model(base, db_model)
+        resolved = model_for_provider(provider_choice, resolved)
         config_model = base.review_model
         thinking_mode = get_review_thinking_mode(base, db_thinking)
     else:
-        return base.model_copy(update={"reasoning_effort": None})
+        return base.model_copy(
+            update={
+                "model": model_for_provider(provider_choice, base.model),
+                "reasoning_effort": None,
+                "api_style": resolved_style,
+            }
+        )
 
     source = "dashboard setting" if db_model else ("mira.yaml" if config_model else "default")
     logger.info("%s model: %s (source: %s)", purpose.capitalize(), resolved, source)
-    return base.model_copy(update={"model": resolved, "reasoning_effort": thinking_mode})
+    return base.model_copy(
+        update={"model": resolved, "reasoning_effort": thinking_mode, "api_style": resolved_style}
+    )

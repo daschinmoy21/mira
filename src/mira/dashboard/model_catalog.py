@@ -19,7 +19,7 @@ import httpx
 from mira.config import LLMConfig
 from mira.llm import provider_profiles as profiles
 from mira.llm import registry
-from mira.llm.provider import _get_api_key
+from mira.llm.base import _get_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +30,14 @@ _locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def active_backend(config: LLMConfig) -> str:
-    """Return "bedrock", "openrouter", or "openai-compatible"."""
+    """Return the model-catalog backend for the deployment."""
     if config.provider == "bedrock":
         return "bedrock"
+    if config.provider in {"codex-cli", "codex_cli", "codex"}:
+        return "codex-cli"
     profile = profiles.resolve(config.base_url)
+    if profile.get("name") == "xai":
+        return "xai"
     return "openrouter" if profile.get("name") == "openrouter" else "openai-compatible"
 
 
@@ -47,7 +51,7 @@ async def _fetch_openai_style(config: LLMConfig, tools_only: bool) -> list[dict]
     """Fetch models, retaining provider pricing when the endpoint supplies it."""
     headers = {}
     try:
-        key = _get_api_key(config)
+        key = _get_api_key(config, profiles.resolve(config.base_url))
     except Exception as exc:
         logger.warning("Could not retrieve API key for model catalog fetch: %s", exc)
         key = ""
@@ -72,6 +76,27 @@ async def _fetch_openai_style(config: LLMConfig, tools_only: bool) -> list[dict]
                 pass
         out.append(item)
     return out
+
+
+# Non-chat / non-tool xAI models that /models also returns.
+_XAI_SKIP = ("imagine", "multi-agent", "embed", "image", "video")
+
+
+async def _fetch_xai(config: LLMConfig) -> list[dict]:
+    """xAI's live model list, ids prefixed ``xai/`` to match the registry."""
+    models = await _fetch_openai_style(config, tools_only=False)
+    return [
+        {**m, "value": f"xai/{m['value']}"}
+        for m in models
+        if not any(skip in m["value"].lower() for skip in _XAI_SKIP)
+    ]
+
+
+async def _fetch_codex(config: LLMConfig) -> list[dict]:
+    """Models the installed Codex CLI offers (works before login)."""
+    from mira.llm import codex_auth
+
+    return await codex_auth.fetch_models(config)
 
 
 def _fetch_bedrock_sync(config: LLMConfig) -> list[dict]:
@@ -108,6 +133,8 @@ async def fetch_catalog(config: LLMConfig) -> list[dict] | None:
     backend = active_backend(config)
     if backend == "bedrock":
         cache_key = f"bedrock:{config.region}:{config.aws_profile or ''}"
+    elif backend == "codex-cli":
+        cache_key = f"codex-cli:{config.codex_command}"
     else:
         cache_key = config.base_url
 
@@ -126,6 +153,10 @@ async def fetch_catalog(config: LLMConfig) -> list[dict] | None:
         try:
             if backend == "bedrock":
                 models = await asyncio.to_thread(_fetch_bedrock_sync, config)
+            elif backend == "codex-cli":
+                models = await _fetch_codex(config)
+            elif backend == "xai":
+                models = await _fetch_xai(config)
             elif backend == "openrouter":
                 models = await _fetch_openai_style(config, tools_only=True)
             else:
@@ -137,35 +168,82 @@ async def fetch_catalog(config: LLMConfig) -> list[dict] | None:
         return models
 
 
+# Per-backend "Recommended" picks. Kept out of models.json, whose recommended_for
+# flags are global (and pinned to the eval-validated Claude pair).
+_BACKEND_RECOMMENDED: dict[str, dict[str, str]] = {
+    "xai": {"review": "xai/grok-4.5", "indexing": "xai/grok-4.3"},
+}
+
+# Metadata the live catalogs may contribute to a picker row. Provider-quoted
+# prices are deliberately not passed through; only registry prices are shown.
+_DYNAMIC_META_KEYS = ("description", "context_window", "reasoning")
+
+
+def _dynamic_option(entry: dict) -> dict:
+    out = {"value": entry["value"], "label": entry["label"], "recommended": False}
+    out.update({k: entry[k] for k in _DYNAMIC_META_KEYS if entry.get(k) is not None})
+    return out
+
+
+def _registry_option(model_id: str, info: dict, purpose: str) -> dict:
+    option: dict = {
+        "value": model_id,
+        "label": info.get("label", model_id),
+        "recommended": purpose in (info.get("recommended_for") or []),
+    }
+    if info.get("description"):
+        option["description"] = info["description"]
+    if info.get("max_input_tokens"):
+        option["context_window"] = info["max_input_tokens"]
+    # Subscription-backed entries are priced 0.00 — no price to show.
+    if info.get("input_cost_per_1m") or info.get("output_cost_per_1m"):
+        option["input_cost_per_1m"] = info.get("input_cost_per_1m")
+        option["output_cost_per_1m"] = info.get("output_cost_per_1m")
+    if info.get("reasoning"):
+        option["reasoning"] = True
+    return option
+
+
 def build_options(backend: str, dynamic: list[dict] | None, purpose: str) -> list[dict]:
     """Dropdown options for ``purpose``: registry entries matching the backend
-    (carrying the recommended flags) merged with the dynamic catalog.
+    (carrying the recommended flags and metadata) merged with the dynamic catalog.
 
     Dynamic-only models have unknown capabilities, so they're offered for both
     purposes. On a generic endpoint only its own list is trustworthy — registry
     ids are OpenRouter-style — so the registry is used there only as fallback.
     """
     if backend == "openai-compatible" and dynamic is not None:
-        options = [{**d, "recommended": False} for d in dynamic]
+        options = [_dynamic_option(d) for d in dynamic]
         options.sort(key=lambda m: m["label"].lower())
         return options
 
-    wants_bedrock = backend == "bedrock"
     options = []
     for model_id, info in registry.all_models().items():
-        if (info.get("provider") == "bedrock") != wants_bedrock:
+        provider = info.get("provider")
+        if backend == "bedrock" and provider != "bedrock":
+            continue
+        if backend == "codex-cli" and provider != "codex-cli":
+            continue
+        if backend == "xai" and provider != "xai":
+            continue
+        if backend not in {"bedrock", "codex-cli"} and provider in {"bedrock", "codex-cli"}:
+            continue
+        # xAI ids (`xai/grok-*`) only mean something to xAI itself (or a
+        # generic endpoint that proxies them); other backends can't serve them.
+        if backend not in {"xai", "openai-compatible"} and provider == "xai":
             continue
         if purpose not in (info.get("purposes") or []):
             continue
-        options.append(
-            {
-                "value": model_id,
-                "label": info.get("label", model_id),
-                "recommended": purpose in (info.get("recommended_for") or []),
-            }
-        )
+        options.append(_registry_option(model_id, info, purpose))
     if dynamic is not None:
         seen = {_norm(o["value"]) for o in options}
-        options += [{**d, "recommended": False} for d in dynamic if _norm(d["value"]) not in seen]
+        options += [_dynamic_option(d) for d in dynamic if _norm(d["value"]) not in seen]
+    pick = _BACKEND_RECOMMENDED.get(backend, {}).get(purpose)
+    for option in options:
+        if option["value"] == pick:
+            option["recommended"] = True
+    if backend == "codex-cli":
+        # Keep Codex's own ordering (newest/most capable first).
+        return options
     options.sort(key=lambda m: (not m["recommended"], m["label"].lower()))
     return options

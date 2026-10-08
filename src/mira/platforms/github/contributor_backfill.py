@@ -24,7 +24,7 @@ from typing import Any
 
 from github import Github, GithubException
 
-from mira.platforms.github.auth import GitHubAuth
+from mira.platforms.github.auth import _GITHUB_API_URL, GitHubAuth
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +90,12 @@ def _maybe_wait_for_rate_limit(gh: Github) -> None:
 
     Rate-limit lookups don't count against the budget, so this is safe to call
     periodically.
+
+    PyGithub >=2.7 returns ``RateLimitOverview``; core REST budget is
+    ``.resources.core`` (was ``.core`` on the old ``RateLimit`` return type).
     """
     try:
-        core = gh.get_rate_limit().core
+        core = gh.get_rate_limit().resources.core
     except GithubException:
         return
     if core.remaining >= _RATE_LIMIT_FLOOR:
@@ -298,7 +301,7 @@ def _backfill_sync(
     progress_cb: Callable[[int, int], None] | None,
 ) -> None:
     """Blocking GitHub work — call via ``asyncio.to_thread``."""
-    gh = Github(token)
+    gh = Github(token, base_url=_GITHUB_API_URL)
     gh_repo = gh.get_repo(f"{owner}/{repo}")
     pulls = gh_repo.get_pulls(state="all", sort="created", direction="asc")
     total = pulls.totalCount
