@@ -10,6 +10,7 @@ import sys
 from datetime import UTC
 
 import click
+import httpx
 
 from mira import __version__
 from mira.config import load_config
@@ -621,3 +622,44 @@ def backfill_contributors(
             backfill_all_repos(app_auth, since=since_epoch, include_commits=include_commits)
         )
         click.echo(f"Backfill complete: {totals}")
+
+
+@main.command()
+@click.argument("provider", type=click.Choice(["xai"]))
+@click.option("--no-browser", is_flag=True, help="Print the login link instead of opening it")
+def login(provider: str, no_browser: bool) -> None:
+    """Log in to an LLM provider with your account instead of an API key.
+
+    \b
+    mira login xai   Sign in with SuperGrok / X Premium and use Grok models.
+                     Then set llm.base_url: https://api.x.ai/v1 (see README).
+    """
+    import webbrowser
+
+    from mira.llm import xai_oauth
+
+    try:
+        device = xai_oauth.request_device_code()
+        url = device.verification_uri_complete or device.verification_uri
+        click.echo(f"Open this link to sign in to xAI:\n\n  {url}\n")
+        click.echo(f"Confirm the code matches: {device.user_code}")
+        if not no_browser:
+            webbrowser.open(url)
+        click.echo("Waiting for approval...")
+        credential = xai_oauth.poll_for_tokens(device)
+        xai_oauth.save_credential(credential)
+    except (xai_oauth.XaiLoginError, httpx.HTTPError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Logged in. Credential saved to {xai_oauth.auth_file()}")
+
+
+@main.command()
+@click.argument("provider", type=click.Choice(["xai"]))
+def logout(provider: str) -> None:
+    """Remove the stored login for a provider."""
+    from mira.llm import xai_oauth
+
+    if xai_oauth.clear_credential():
+        click.echo(f"Removed {xai_oauth.auth_file()}")
+    else:
+        click.echo("No stored xAI login.")

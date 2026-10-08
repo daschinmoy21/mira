@@ -33,6 +33,13 @@ LLM_ERROR_MESSAGES: dict[str, ErrorMessage] = {
         ),
         safe="No API key found",
     ),
+    "xai_login_required": ErrorMessage(
+        full=(
+            "xAI login is missing or expired ({reason}). Run `mira login xai` "
+            "on the Mira host, or set XAI_API_KEY."
+        ),
+        safe="xAI login required",
+    ),
     "api_error": ErrorMessage(
         full="LLM API error {status}: {body}",
         safe="LLM API error {status}",

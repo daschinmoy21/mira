@@ -20,6 +20,15 @@
     "reasoning_effort_map": {}
   },
 
+  "xai": {
+    "base_url": "https://api.x.ai/v1",
+    "api_key_env": "XAI_API_KEY",
+    "auth": "xai-oauth",
+    "model_prefix": "strip",
+    "extra_headers": {},
+    "reasoning_effort_map": { "max": "high", "xhigh": "high" }
+  },
+
   "opencode-go": {
     "base_url": "https://opencode.ai/zen/go/v1",
     "api_key_env": "OPENCODE_API_KEY",

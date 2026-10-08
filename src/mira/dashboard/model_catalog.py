@@ -49,7 +49,7 @@ async def _fetch_openai_style(config: LLMConfig, tools_only: bool) -> list[dict]
     """Fetch models, retaining provider pricing when the endpoint supplies it."""
     headers = {}
     try:
-        key = _get_api_key(config)
+        key = _get_api_key(config, profiles.resolve(config.base_url))
     except Exception as exc:
         logger.warning("Could not retrieve API key for model catalog fetch: %s", exc)
         key = ""

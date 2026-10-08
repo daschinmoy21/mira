@@ -12,10 +12,14 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 from mira.config import LLMConfig
 from mira.exceptions import LLMError, NonRetriableLLMError
 from mira.llm import provider_profiles as profiles
+from mira.llm import xai_oauth
 from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL, SUBMIT_WALKTHROUGH_TOOL
 from mira.llm.usage import estimate_cost_usd, parse_openai_usage
 
 logger = logging.getLogger(__name__)
+
+# Profile `auth` value for endpoints authenticated by the `mira login xai` token.
+XAI_OAUTH_AUTH = "xai-oauth"
 
 
 @runtime_checkable
@@ -76,6 +80,23 @@ class LLMProviderProtocol(Protocol):
 # ── Module-level helpers (shared by both providers) ─────────────────
 
 
+_DEFAULT_API_KEY_ENV = "OPENROUTER_API_KEY"
+
+
+def _get_xai_oauth_key(config: LLMConfig, profile: dict) -> str:
+    """Key for an xAI-bound request: an explicit API key, else the `mira login xai` token.
+
+    The OpenRouter/OpenAI fallbacks are deliberately skipped, so a key meant for
+    another service is never sent to api.x.ai just because `api_key_env` was left
+    at its default.
+    """
+    explicit = config.api_key_env if config.api_key_env != _DEFAULT_API_KEY_ENV else None
+    for env_name in (explicit, profile.get("api_key_env")):
+        if env_name and (key := os.environ.get(env_name)):
+            return key
+    return xai_oauth.get_access_token()
+
+
 def _get_api_key(config: LLMConfig, profile: dict | None = None) -> str:
     """Resolve the API key for the configured endpoint.
 
@@ -87,6 +108,8 @@ def _get_api_key(config: LLMConfig, profile: dict | None = None) -> str:
     """
     if config.api_key_env == "":
         return ""
+    if profile and profile.get("auth") == XAI_OAUTH_AUTH:
+        return _get_xai_oauth_key(config, profile)
     key = os.environ.get(config.api_key_env, "")
     if not key and profile and profile.get("api_key_env"):
         key = os.environ.get(profile["api_key_env"], "")
@@ -174,14 +197,17 @@ class OpenAICompatibleProvider:
         """Build request headers: Content-Type, optional Bearer auth, and any
         provider-specific extras from the profile. Authorization is omitted
         entirely if the endpoint needs no key (Ollama, llama.cpp, etc.)."""
-        if hasattr(self, "_cached_headers"):
+        # OAuth bearer tokens expire, so those profiles resolve the key per call.
+        cacheable = self.profile.get("auth") != XAI_OAUTH_AUTH
+        if cacheable and hasattr(self, "_cached_headers"):
             return dict(self._cached_headers)
         headers: dict[str, str] = {"Content-Type": "application/json"}
         key = _get_api_key(self.config, self.profile)
         if key:
             headers["Authorization"] = f"Bearer {key}"
         headers.update(self.profile.get("extra_headers", {}))
-        self._cached_headers = headers
+        if cacheable:
+            self._cached_headers = headers
         return dict(headers)
 
     def _apply_reasoning(self, body: dict) -> None:
