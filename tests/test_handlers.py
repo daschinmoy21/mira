@@ -597,6 +597,20 @@ async def test_mention_review_failure_replies_with_safe_error(
     assert "grok" not in reply and "secret-body" not in reply
 
 
+async def test_mention_review_failure_never_leaks_provider_details(
+    mock_app_auth: AsyncMock, mock_pr_info: PRInfo
+) -> None:
+    """ProviderError text embeds API URLs and response bodies — the reply must
+    carry only the generic per-class description."""
+    from mira.exceptions import ProviderError
+
+    err = ProviderError("GitLab GET https://gitlab.internal/api/v4/x → 500: secret-body")
+    provider = await _run_comment_review("@mira-bot review", err, mock_app_auth, mock_pr_info)
+
+    [reply] = _posted(provider)
+    assert reply == "> @alice: the review failed — Code host API request failed."
+
+
 async def test_mention_review_with_no_findings_replies(
     mock_app_auth: AsyncMock, mock_pr_info: PRInfo
 ) -> None:
