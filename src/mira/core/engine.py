@@ -636,6 +636,7 @@ class ReviewEngine:
         # Overlap detection keeps the full diff — its fingerprint must cover the
         # whole PR, not just the latest commits.
         full_diff_text = diff_text
+        no_new_commits = False
         if review_round >= 2 and pr_info.head_sha:
             try:
                 from mira.dashboard.api import _app_db
@@ -685,6 +686,7 @@ class ReviewEngine:
                             pr_info.url,
                         )
                         diff_text = ""
+                        no_new_commits = True
             except Exception as exc:
                 logger.warning(
                     "Incremental diff fetch failed, falling back to full diff: %s",
@@ -720,6 +722,10 @@ class ReviewEngine:
                 resolved_threads=resolved_thread_dicts or None,
                 team_conventions=team_conventions,
             )
+            if no_new_commits and not result.skipped_reason:
+                result.skipped_reason = (
+                    f"No new commits since the last review ({pr_info.head_sha[:8]})."
+                )
         except BaseException as exc:
             if overlap_task is not None:
                 overlap_task.cancel()

@@ -4,6 +4,7 @@ none is tied to a specific platform's payload shape."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -16,11 +17,13 @@ from mira.config import load_config
 from mira.core.engine import ReviewEngine
 from mira.core.review_status import tracker as review_tracker
 from mira.dashboard.models_config import llm_config_for
+from mira.exceptions import MiraError
 from mira.index.store import IndexStore
 from mira.llm import create_llm
 from mira.llm.prompts.review import build_conversation_prompt
 from mira.llm.tool_schemas import SUBMIT_THREAD_REPLY_TOOL
 from mira.llm.utils import strip_code_fences, strip_think_blocks
+from mira.models import ReviewResult
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +52,86 @@ _PAUSE_KEYWORDS = {"pause"}
 _RESUME_KEYWORDS = {"resume"}
 
 
+_review_slots: asyncio.Semaphore | None = None
+
+
 def _open_store(owner: str, repo: str, platform: str = "github") -> IndexStore:
     """Open an IndexStore for the given owner/repo."""
     return IndexStore.open(owner, repo, platform=platform)
+
+
+def _review_slot(config: Any) -> asyncio.Semaphore:
+    """Server-wide cap on reviews running at once (``review.max_concurrent_reviews``).
+
+    Created on first use, so the limit is read once per process.
+    """
+    global _review_slots
+    if _review_slots is None:
+        _review_slots = asyncio.Semaphore(config.review.max_concurrent_reviews)
+    return _review_slots
+
+
+async def _run_tracked_review(
+    engine: ReviewEngine,
+    config: Any,
+    repo_full: str,
+    number: int,
+    pr_title: str,
+    pr_url: str,
+) -> ReviewResult | None:
+    """Claim the PR in the review tracker, wait for a free review slot, review.
+
+    Returns None without reviewing when this PR is already being reviewed.
+    """
+    # Atomically claim the slot — avoids stacking redundant runs when
+    # two concurrent webhooks arrive.
+    if not review_tracker.try_start(repo_full, number, pr_title, pr_url):
+        logger.info("Review already in progress for %s, skipping", pr_url)
+        return None
+    try:
+        slot = _review_slot(config)
+        if slot.locked():
+            logger.info("Review of %s queued — max concurrent reviews reached", pr_url)
+        async with slot:
+            result = await engine.review_pr(pr_url)
+    except BaseException as exc:
+        review_tracker.fail(repo_full, number, str(exc) or type(exc).__name__)
+        raise
+    review_tracker.complete(repo_full, number)
+    return result
+
+
+def _safe_error(exc: BaseException) -> str:
+    """User-safe description of an error — no model names or provider bodies."""
+    return exc.safe_message if isinstance(exc, MiraError) else type(exc).__name__
+
+
+async def _reply_to_mention(provider: Any, pr_url: str, body: str) -> None:
+    """Post a PR comment answering an @-mention. Best-effort; never raises."""
+    try:
+        pr_info = await provider.get_pr_info(pr_url)
+        await provider.post_comment(pr_info, body)
+    except Exception as exc:
+        logger.warning("Failed to reply to mention on %s: %s", pr_url, exc)
+
+
+def _review_outcome_message(actor: str, result: ReviewResult | None) -> str | None:
+    """Reply for an @-mention review that left no new review on the PR.
+
+    The walkthrough comment is edited in place, which doesn't notify anyone,
+    so without this a clean or skipped review looks like an ignored mention.
+    Returns None when the review posted inline comments (they notify).
+    """
+    if result is None:
+        return (
+            f"> @{actor}: a review of this PR is already running — "
+            "results will appear when it finishes."
+        )
+    if result.comments:
+        return None
+    if result.skipped_reason:
+        return f"> @{actor}: nothing to review — {result.skipped_reason}"
+    return f"> @{actor}: review finished — no new issues found."
 
 
 def _help_message(bot_name: str) -> str:
@@ -93,13 +173,6 @@ async def run_pr_review(
     every platform.
     """
     repo_full = f"{owner}/{repo}"
-
-    # Atomically claim the slot — avoids stacking redundant runs when
-    # two concurrent webhooks arrive. Returns False if already reviewing.
-    if not review_tracker.try_start(repo_full, number, pr_title, pr_url):
-        logger.info("Review already in progress for %s, skipping", pr_url)
-        return
-
     config = load_config()
     from mira.dashboard.models_config import llm_config_for
 
@@ -128,12 +201,9 @@ async def run_pr_review(
     is_indexed = bool(repo_record and repo_record.status == "ready")
 
     logger.info("Reviewing %s (indexed=%s)", pr_url, is_indexed)
-    try:
-        result = await engine.review_pr(pr_url)
-        review_tracker.complete(repo_full, number)
-    except Exception as exc:
-        review_tracker.fail(repo_full, number, str(exc))
-        raise
+    result = await _run_tracked_review(engine, config, repo_full, number, pr_title, pr_url)
+    if result is None:
+        return
 
     # The walkthrough comment already carries the "more accurate after indexing"
     # nudge for unindexed repos, so we don't post a separate note here — that
@@ -198,59 +268,46 @@ async def run_pr_command(
         logger.info("Help requested on %s by @%s", pr_url, actor)
         return
 
-    if is_review_rest:
-        from mira.dashboard.api import _app_db
+    if is_review or is_review_rest:
+        engine = ReviewEngine(
+            config=config,
+            llm=llm,
+            provider=provider,
+            bot_name=bot_name,
+            indexing_llm=indexing_llm,
+            security_llm=security_llm,
+        )
+        if is_review_rest:
+            from mira.dashboard.api import _app_db
 
-        progress = _app_db.get_pr_review_progress(owner, repo, number, platform=platform)
-        if not progress or not progress.skipped_paths:
-            pr_info_for_reply = await provider.get_pr_info(pr_url)
-            await provider.post_comment(
-                pr_info_for_reply,
-                f"> @{actor}: nothing left to review — every file in this "
-                "PR has already been covered. 🎉",
+            progress = _app_db.get_pr_review_progress(owner, repo, number, platform=platform)
+            if not progress or not progress.skipped_paths:
+                await _reply_to_mention(
+                    provider,
+                    pr_url,
+                    f"> @{actor}: nothing left to review — every file in this "
+                    "PR has already been covered. 🎉",
+                )
+                return
+            engine._review_only_paths = set(progress.skipped_paths)  # type: ignore[attr-defined]
+            logger.info(
+                "review-rest on %s by @%s — %d file(s)", pr_url, actor, len(progress.skipped_paths)
             )
-            return
-        engine = ReviewEngine(
-            config=config,
-            llm=llm,
-            provider=provider,
-            bot_name=bot_name,
-            indexing_llm=indexing_llm,
-            security_llm=security_llm,
-        )
-        engine._review_only_paths = set(progress.skipped_paths)  # type: ignore[attr-defined]
-        if not review_tracker.try_start(repo_full, number, pr_title, pr_url):
-            logger.info("Review already in progress for %s, skipping", pr_url)
-            return
-        logger.info(
-            "review-rest on %s by @%s — %d file(s)", pr_url, actor, len(progress.skipped_paths)
-        )
+        else:
+            logger.info("Re-review triggered for %s by @%s", pr_url, actor)
         try:
-            await engine.review_pr(pr_url)
-            review_tracker.complete(repo_full, number)
+            result = await _run_tracked_review(engine, config, repo_full, number, pr_title, pr_url)
         except Exception as exc:
-            review_tracker.fail(repo_full, number, str(exc))
+            await _reply_to_mention(
+                provider, pr_url, f"> @{actor}: the review failed — {_safe_error(exc)}."
+            )
             raise
-    elif is_review:
-        engine = ReviewEngine(
-            config=config,
-            llm=llm,
-            provider=provider,
-            bot_name=bot_name,
-            indexing_llm=indexing_llm,
-            security_llm=security_llm,
-        )
-        if not review_tracker.try_start(repo_full, number, pr_title, pr_url):
-            logger.info("Review already in progress for %s, skipping", pr_url)
-            return
-        logger.info("Re-review triggered for %s by @%s", pr_url, actor)
-        try:
-            await engine.review_pr(pr_url)
-            review_tracker.complete(repo_full, number)
-        except Exception as exc:
-            review_tracker.fail(repo_full, number, str(exc))
-            raise
-    else:
+        message = _review_outcome_message(actor, result)
+        if message:
+            await _reply_to_mention(provider, pr_url, message)
+        return
+
+    try:
         pr_info = await provider.get_pr_info(pr_url)
         diff_text = await provider.get_pr_diff(pr_info)
         messages = build_conversation_prompt(
@@ -260,8 +317,13 @@ async def run_pr_command(
             pr_description=pr_info.description,
         )
         response = await llm.complete(messages, json_mode=False)
-        await provider.post_comment(pr_info, f"> @{actor} asked: {question}\n\n{response}")
-        logger.info("Replied to comment on %s", pr_url)
+    except Exception as exc:
+        await _reply_to_mention(
+            provider, pr_url, f"> @{actor}: couldn't answer that — {_safe_error(exc)}."
+        )
+        raise
+    await provider.post_comment(pr_info, f"> @{actor} asked: {question}\n\n{response}")
+    logger.info("Replied to comment on %s", pr_url)
 
 
 async def run_thread_reply(
