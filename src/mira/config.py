@@ -196,6 +196,11 @@ class ReviewConfig(BaseModel):
     code_context: bool = True
     context_token_budget: int = 8_000
     max_concurrent_chunks: int = Field(default=5, ge=1, le=20)
+    # Server-wide cap on whole PR reviews running at once; extras queue. Each
+    # review already fans out into max_concurrent_chunks parallel LLM calls, so
+    # a burst of reviews can saturate the provider and time out siblings.
+    # Read once at first review — changing it needs a restart.
+    max_concurrent_reviews: int = Field(default=2, ge=1, le=20)
     # Review each chunk N times and keep only majority-vote findings.
     # 1 = off (single pass, exact current behavior). 3 is the sweet spot:
     # variance FPs flicker across runs, real findings recur. Runs fire in

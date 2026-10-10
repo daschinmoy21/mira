@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -20,6 +21,15 @@ from mira.models import (
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_review_slots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each test its own server-wide review semaphore — the real one is
+    created once per process, and handler tests pass a MagicMock config."""
+    from mira.platforms import handlers
+
+    monkeypatch.setattr(handlers, "_review_slots", asyncio.Semaphore(2))
 
 
 @pytest.fixture

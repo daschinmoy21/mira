@@ -544,3 +544,176 @@ async def test_handle_pause_exception_logged_not_raised(
         await handle_pause_resume(_make_pause_comment_payload(), mock_app_auth, "mira-bot", "pause")
 
     assert "boom" in caplog.text
+
+
+# ── @-mention review outcome replies ─────────────────────────────────────────
+
+
+async def _run_comment_review(
+    body: str,
+    review: ReviewResult | Exception,
+    mock_app_auth: AsyncMock,
+    mock_pr_info: PRInfo,
+) -> AsyncMock:
+    """Drive handle_comment for a review command; return the provider mock."""
+    mock_provider = AsyncMock()
+    mock_provider.get_pr_info = AsyncMock(return_value=mock_pr_info)
+    mock_engine = AsyncMock()
+    if isinstance(review, Exception):
+        mock_engine.review_pr = AsyncMock(side_effect=review)
+    else:
+        mock_engine.review_pr = AsyncMock(return_value=review)
+    with (
+        patch("mira.platforms.handlers.load_config", return_value=MagicMock()),
+        patch("mira.platforms.handlers.create_llm"),
+        patch("mira.platforms.handlers.ReviewEngine", return_value=mock_engine),
+        patch("mira.platforms.github.webhook.create_provider", return_value=mock_provider),
+    ):
+        await handle_comment(_make_comment_payload(body), mock_app_auth, "mira-bot")
+    return mock_provider
+
+
+def _posted(mock_provider: AsyncMock) -> list[str]:
+    return [c.args[1] for c in mock_provider.post_comment.await_args_list]
+
+
+async def test_mention_review_failure_replies_with_safe_error(
+    mock_app_auth: AsyncMock, mock_pr_info: PRInfo
+) -> None:
+    """A failed @-mention review replies on the PR with the user-safe message —
+    no model names or provider response bodies."""
+    from mira.exceptions import LLMError
+
+    err = LLMError(
+        "both_models_failed",
+        primary_model="xai/grok-4.5",
+        fallback_model="meta/muse-spark",
+        error="404 secret-body",
+    )
+    provider = await _run_comment_review("@mira-bot review", err, mock_app_auth, mock_pr_info)
+
+    [reply] = _posted(provider)
+    assert reply == "> @alice: the review failed — Both primary and fallback models failed."
+    assert "grok" not in reply and "secret-body" not in reply
+
+
+async def test_mention_review_failure_never_leaks_provider_details(
+    mock_app_auth: AsyncMock, mock_pr_info: PRInfo
+) -> None:
+    """ProviderError text embeds API URLs and response bodies — the reply must
+    carry only the generic per-class description."""
+    from mira.exceptions import ProviderError
+
+    err = ProviderError("GitLab GET https://gitlab.internal/api/v4/x → 500: secret-body")
+    provider = await _run_comment_review("@mira-bot review", err, mock_app_auth, mock_pr_info)
+
+    [reply] = _posted(provider)
+    assert reply == "> @alice: the review failed — Code host API request failed."
+
+
+async def test_mention_review_with_no_findings_replies(
+    mock_app_auth: AsyncMock, mock_pr_info: PRInfo
+) -> None:
+    """A clean review only edits the walkthrough in place, so the mention gets
+    an explicit reply instead of looking ignored."""
+    provider = await _run_comment_review(
+        "@mira-bot review", ReviewResult(summary="ok"), mock_app_auth, mock_pr_info
+    )
+
+    assert _posted(provider) == ["> @alice: review finished — no new issues found."]
+
+
+async def test_mention_review_skipped_replies_with_reason(
+    mock_app_auth: AsyncMock, mock_pr_info: PRInfo
+) -> None:
+    result = ReviewResult(summary="", skipped_reason="No new commits since the last review.")
+    provider = await _run_comment_review("@mira-bot review", result, mock_app_auth, mock_pr_info)
+
+    assert _posted(provider) == [
+        "> @alice: nothing to review — No new commits since the last review."
+    ]
+
+
+async def test_mention_review_with_findings_posts_no_extra_reply(
+    mock_app_auth: AsyncMock, mock_pr_info: PRInfo
+) -> None:
+    """Inline comments already notify the PR — no redundant reply."""
+    result = ReviewResult(summary="ok", comments=[_comment(Severity.WARNING)])
+    provider = await _run_comment_review("@mira-bot review", result, mock_app_auth, mock_pr_info)
+
+    assert _posted(provider) == []
+
+
+async def test_mention_review_already_running_replies(
+    mock_app_auth: AsyncMock, mock_pr_info: PRInfo
+) -> None:
+    from mira.core.review_status import tracker
+
+    pr_url = "https://github.com/testowner/testrepo/pull/7"
+    assert tracker.try_start("testowner/testrepo", 7, "t", pr_url)
+    try:
+        provider = await _run_comment_review(
+            "@mira-bot review", ReviewResult(summary="ok"), mock_app_auth, mock_pr_info
+        )
+    finally:
+        tracker.complete("testowner/testrepo", 7)
+
+    [reply] = _posted(provider)
+    assert "already running" in reply
+
+
+async def test_mention_question_failure_replies(
+    mock_app_auth: AsyncMock, mock_pr_info: PRInfo
+) -> None:
+    from mira.exceptions import LLMError
+
+    mock_llm = AsyncMock()
+    mock_llm.complete = AsyncMock(
+        side_effect=LLMError("completion_failed", model="m", error="timeout")
+    )
+    mock_provider = AsyncMock()
+    mock_provider.get_pr_info = AsyncMock(return_value=mock_pr_info)
+    mock_provider.get_pr_diff = AsyncMock(return_value="diff")
+    with (
+        patch("mira.platforms.handlers.load_config", return_value=MagicMock()),
+        patch("mira.platforms.handlers.create_llm", return_value=mock_llm),
+        patch("mira.platforms.github.webhook.create_provider", return_value=mock_provider),
+    ):
+        await handle_comment(
+            _make_comment_payload("@mira-bot why is this slow?"), mock_app_auth, "mira-bot"
+        )
+
+    assert _posted(mock_provider) == ["> @alice: couldn't answer that — LLM completion failed."]
+
+
+async def test_reviews_beyond_the_limit_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """max_concurrent_reviews caps whole reviews running at once; extras wait."""
+    import asyncio
+
+    from mira.platforms import handlers
+
+    monkeypatch.setattr(handlers, "_review_slots", asyncio.Semaphore(1))
+    running = 0
+    peak = 0
+
+    async def review_pr(pr_url: str) -> ReviewResult:
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.01)
+        running -= 1
+        return ReviewResult(summary="ok")
+
+    engine = MagicMock()
+    engine.review_pr = review_pr
+    results = await asyncio.gather(
+        *[
+            handlers._run_tracked_review(
+                engine, MagicMock(), "o/r", n, "t", f"https://github.com/o/r/pull/{n}"
+            )
+            for n in (101, 102, 103)
+        ]
+    )
+
+    assert peak == 1
+    assert all(r is not None for r in results)

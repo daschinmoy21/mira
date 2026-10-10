@@ -11,18 +11,26 @@ from mira.error_messages import get_error_message
 class MiraError(Exception):
     """Base exception for all Mira errors."""
 
+    # Generic per-class text for PR comments. str(exc) can carry API URLs and
+    # response bodies (ProviderError embeds both), so it is never shown.
+    safe_description = "Unexpected error"
+
     @property
     def safe_message(self) -> str:
         """User-safe error message without sensitive details."""
-        return str(self)
+        return self.safe_description
 
 
 class ConfigError(MiraError):
     """Error loading or validating configuration."""
 
+    safe_description = "Configuration error"
+
 
 class DiffParseError(MiraError):
     """Error parsing a diff/patch."""
+
+    safe_description = "Could not parse the diff"
 
 
 class LLMError(MiraError):
@@ -62,10 +70,16 @@ class NonRetriableLLMError(LLMError):
 class ResponseParseError(MiraError):
     """Error parsing or validating LLM response."""
 
+    safe_description = "Could not parse the model response"
+
 
 class ProviderError(MiraError):
     """Error communicating with a code hosting provider (GitHub, etc.)."""
 
+    safe_description = "Code host API request failed"
+
 
 class WebhookError(MiraError):
     """Error processing a webhook event."""
+
+    safe_description = "Webhook processing failed"

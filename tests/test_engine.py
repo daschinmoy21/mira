@@ -1514,6 +1514,42 @@ class TestIncrementalDiff:
         assert captured["diff_text"] == "FULL"
 
     @pytest.mark.asyncio
+    async def test_round_2_without_new_commits_explains_skip(self, monkeypatch):
+        """An empty incremental diff skips the review with a stated reason, so
+        the walkthrough and the @-mention reply say why nothing was reviewed."""
+        from mira.core.engine import ReviewEngine
+        from mira.models import WALKTHROUGH_MARKER, ReviewResult
+
+        mock_provider = self._provider_with_threads_and_compare(
+            threads=[self._make_thread()], incremental=""
+        )
+        mock_provider.find_bot_comment = AsyncMock(return_value=99)
+
+        mock_db = MagicMock()
+        mock_db.get_last_reviewed_sha = MagicMock(return_value="OLD_SHA")
+        mock_db.get_repo = MagicMock(return_value=None)
+        monkeypatch.setattr("mira.dashboard.api._app_db", mock_db)
+
+        async def fake_internal(self, diff_text, **kwargs):
+            assert diff_text == ""
+            return ReviewResult(summary="No files to review.")
+
+        monkeypatch.setattr(ReviewEngine, "_review_diff_internal", fake_internal)
+
+        engine = ReviewEngine(
+            config=MiraConfig(),
+            llm=AsyncMock(),
+            provider=mock_provider,
+            bot_name="mira",
+        )
+        result = await engine.review_pr("https://github.com/o/r/pull/1")
+
+        assert result.skipped_reason == "No new commits since the last review (HEAD_SHA)."
+        final_body = mock_provider.update_comment.call_args.args[2]
+        assert final_body.startswith(WALKTHROUGH_MARKER)
+        assert "No new commits since the last review" in final_body
+
+    @pytest.mark.asyncio
     async def test_round_1_does_not_use_compare(self, monkeypatch):
         """Round 1 must always do a full review — no incremental."""
         from mira.core.engine import ReviewEngine
