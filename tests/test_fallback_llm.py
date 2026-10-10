@@ -122,3 +122,24 @@ def test_usage_sums_both_backends() -> None:
     assert usage["completion_tokens"] == 14
     assert usage["cost_usd"] == 0.5
     assert usage["total_tokens"] == 44
+
+
+async def test_capabilities_follow_the_active_backend() -> None:
+    primary = _mock_provider(complete=AsyncMock(side_effect=TimeoutError()))
+    primary.supports_temperature = True
+    primary.count_tokens = MagicMock(return_value=1)
+    primary.config = "primary-config"
+    fallback = _mock_provider(complete=AsyncMock(return_value="{}"))
+    fallback.supports_tool_calling = False
+    fallback.supports_temperature = False
+    fallback.count_tokens = MagicMock(return_value=2)
+    fallback.config = "fallback-config"
+    llm = _wrap(primary, fallback)
+
+    assert (llm.supports_tool_calling, llm.supports_temperature) == (True, True)
+    assert (llm.count_tokens("x"), llm.config) == (1, "primary-config")
+
+    await llm.complete([])
+
+    assert (llm.supports_tool_calling, llm.supports_temperature) == (False, False)
+    assert (llm.count_tokens("x"), llm.config) == (2, "fallback-config")

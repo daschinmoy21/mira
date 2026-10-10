@@ -42,17 +42,28 @@ class FallbackLLM:
         self.primary_model = primary_model
         self.fallback_model = fallback_model
         self._primary_failed = False
-        self.supports_json_mode = primary.supports_json_mode
-        self.supports_tool_calling = primary.supports_tool_calling
+
+    # Config and capabilities follow whichever backend is serving calls now.
+
+    @property
+    def _active(self) -> LLMProviderProtocol:
+        return self.fallback if self._primary_failed else self.primary
 
     @property
     def config(self) -> Any:
-        return self.fallback.config if self._primary_failed else self.primary.config  # type: ignore[attr-defined]
+        return self._active.config  # type: ignore[attr-defined]
+
+    @property
+    def supports_json_mode(self) -> bool:
+        return bool(self._active.supports_json_mode)
+
+    @property
+    def supports_tool_calling(self) -> bool:
+        return bool(self._active.supports_tool_calling)
 
     @property
     def supports_temperature(self) -> bool:
-        active = self.fallback if self._primary_failed else self.primary
-        return bool(getattr(active, "supports_temperature", True))
+        return bool(getattr(self._active, "supports_temperature", True))
 
     async def _call(self, call: Callable[[LLMProviderProtocol], Awaitable[T]]) -> T:
         if not self._primary_failed:
@@ -116,7 +127,7 @@ class FallbackLLM:
         return await self._call(lambda llm: llm.walkthrough(messages))
 
     def count_tokens(self, text: str) -> int:
-        return self.primary.count_tokens(text)
+        return self._active.count_tokens(text)
 
     def _total(self, attr: str) -> Any:
         return getattr(self.primary, attr, 0) + getattr(self.fallback, attr, 0)
