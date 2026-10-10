@@ -531,7 +531,6 @@ async def _run_initial_indexing(default_mode: str) -> None:
     from mira.platforms.fetch import EmptyRepoError, make_fetcher
 
     config = load_config()
-    llm = create_llm(llm_config_for("indexing", config.llm))
 
     for repo_record in to_index:
         owner, repo, platform = repo_record.owner, repo_record.repo, repo_record.platform
@@ -549,6 +548,9 @@ async def _run_initial_indexing(default_mode: str) -> None:
         try:
             _app_db.set_repo_status(owner, repo, "indexing", platform=platform)
             tracker.start(full_name)
+            # Fresh per repo: a cross-provider fallback is sticky per instance,
+            # so one repo's primary outage mustn't pin every later repo to it.
+            llm = create_llm(llm_config_for("indexing", config.llm))
             store = IndexStore.open(owner, repo, platform=platform)
             count = await index_repo(
                 owner=owner,
